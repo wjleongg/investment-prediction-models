@@ -1,0 +1,64 @@
+
+
+Setup
+    1. Dependencies:
+    #Install the required libraries using pip
+
+    pip install pandas numpy xgboost scikit-learn matplotlib
+    
+    2. Input and Output Files
+    #Navigate to investment-prediction-models/investment-prediction-models/us_stock_prediction/data_files in this Repository
+    #Download test data set "indicators_data_test.csv" and training data set indicators_data_train.csv
+    #Update the input file path by replacing "Insert Training File Path (xlsx)"
+    #Create an output file and update its path by replacing "Insert Output File Location (xlsx)"
+    
+    train_df = pd.read_csv(r'Insert Training File Path (xlsx)')
+    test_df = pd.read_csv(r'Insert Testing File Path (xlsx)')
+
+    output_file = r"Insert Output File Location (xlsx)"
+
+Model Learning Conditions
+    1. Adjust parameters to vary Model Learning Conditions
+    #Under Learning Condition or at line 38 update "NUMBER" in ['Close'].shift(-NUMBER) to change the number of days the Model analyzes, currently it is set to 100
+    #Example train_df['Future_Return'] = train_df.groupby('Symbol')['Close'].shift(-100) / train_df['Close'] - 1
+
+    train_df['Future_Return'] = train_df.groupby('Symbol')['Close'].shift(-NUMBER) / train_df['Close'] - 1
+
+    #Alternatively you can adjust the parameters at under Train XGBoost Model (line 42)
+    model = xgb.XGBRegressor(objective='reg:squarederror', n_estimators=300, learning_rate=0.05, max_depth=5)
+
+Trading Simulation
+    1. Adjust Trade Conditions 
+    #Modify values to vary Portfolio value, Max position size or Max trades
+    
+    portfolio_value = 100000
+    max_position = 0.20 * portfolio_value
+    #max_trades = 0 # Remove Comment to Set limit on number of trades
+    trade_log = []
+    open_positions = {}
+
+Run the Model
+    1. Train the Model
+    #Execute the script to train the model using the training dataset and predict the future returns on the test dataset
+
+    python stock_prediction.py
+    
+    2. Example Output in Terminal
+    Trade log saved to C:\Users\YourUsername\Documents\investment-prediction-models\output\trade_log.xlsx
+    Final Portfolio Value: $150,000.00
+    Total Profit: $50,000.00
+    Win/Loss Ratio: 93 / 42
+    
+    Best Performing Trade: {'Trade Number': 1, 'Symbol': 'TSLA', 'Entry Price': 150.0, 'Exit Price': 200.0, 'Profit & Loss': 10000}
+    Worst Performing Trade: {'Trade Number': 2, 'Symbol': 'AAPL', 'Entry Price': 120.0, 'Exit Price': 100.0, 'Profit & Loss': -5000}
+
+    #A pop-up will display a graphical representation of Feature Importance in  the trained Stock Prediction Model
+    #You can adjust the model conditions to see how the graph changes and better understand which features influence the model's predictions the most.
+
+    
+    3. Example of Output File
+    Trade Number | Symbol | Entry Date | Entry Price |Size of Position| Predicted Return | Exit Date | Exit Price | Profit & Loss |
+    -------------------------------------------------------------------------------------------------------------------------------
+    1            | TSLA   |2023-01-03  | 150.0      | 20000           |   9%             |2023-01-28 | 200.0      | 10000         |
+    2            | AAPL   |2023-01-03  | 120.0      | 20000           |   2%             |2023-01-28 | 100.0      | -5000         |
+
