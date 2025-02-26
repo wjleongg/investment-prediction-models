@@ -1,0 +1,26 @@
+
+The Output xlsx file contains every trade made by the Model
+
+Output:
+Trade log saved to: Output File Location
+Final Portfolio Value: $403707.35
+Total Profit: $195668.93
+Win/Loss Ratio: 113 / 61
+
+Best Performing Trade: 
+{'Trade Number': 142, 'Symbol': 'NVDA', 
+'Entry Date': Timestamp('2023-01-03 00:00:00'), 
+'Entry Price': 14.31499958, 
+'Size of Position': 20000.0, 
+'Predicted Return': 0.10337287932634354, 
+'Exit Date': Timestamp('2023-12-29 00:00:00'), 
+'Exit Price': np.float64(49.52199936), 
+'Profit & Loss': np.float64(49188.96376244253)}
+
+Worst Performing Trade: 
+{'Trade Number': 71, 'Symbol': 'FTNT', 
+'Entry Date': Timestamp('2023-06-15 00:00:00'), 
+'Entry Price': 73.58999634, 'Size of Position': 20000.0, 
+'Predicted Return': 0.0242322888225317, 
+'Exit Date': Timestamp('2023-08-04 00:00:00'), 
+'Exit Price': 56.77000046, 'Profit & Loss': -4571.272378459803}
