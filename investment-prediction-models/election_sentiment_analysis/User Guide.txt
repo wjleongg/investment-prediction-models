@@ -1,0 +1,56 @@
+
+
+Setup
+    1. Dependencies:
+    #Install the required libraries using pip
+
+    pip install praw tweepy nltk newsapi-python yfinance
+    
+    2. API Keys
+    #Replace the placeholders in the following variables with your own API keys. You can obtain these keys by registering for access to the respective services
+
+    TWITTER_API_KEY = "Insert Twitter API"
+    TWITTER_API_SECRET_KEY = "Insert Twitter API Secret"
+    TWITTER_BEARER_TOKEN = "Insert Twitter Token"
+    TWITTER_ACCESS_TOKEN = "Insert Twitter Token"
+    TWITTER_ACCESS_TOKEN_SECRET = "Insert Twitter Token"
+    REDDIT_CLIENT_ID = "Insert Reddit Token"
+    REDDIT_CLIENT_SECRET = "Insert Reddit Token"
+    NEWS_API_KEY = "Insert Google News API Token"
+
+Date Range Configuration
+    #Ensure that the date range for analysis is set correctly
+    
+    1. Date range for the overall analysis
+    START_DATE = "2024-10-01T00:00:00Z"
+    END_DATE = "2024-10-25T23:59:59Z"
+    
+    2. Dates for Twitter API
+    TWITTER_START_DATE = datetime(2024, 10, 2, 21, 0, 0).isoformat() + "Z"
+    TWITTER_END_DATE = datetime(2024, 10, 25, 23, 59, 59).isoformat() + "Z"
+    
+    3. Dates for News API
+    NEWS_API_START_DATE = "2024-10-01T00:00:00Z"
+
+Run the Model
+    1. Execute the script
+    #Run the script from your terminal or IDE. If running from the terminal, navigate to the directory containing the script and run 
+
+    python sentiment_analysis_stock_prediction.py
+  
+    2. Example Output in Terminal
+    #The model will output sentiment analysis results along with the predicted election winner and potential investment opportunities
+
+    Positive Sentiment: 150
+    Negative Sentiment: 120
+    The likely winner based on sentiment is: Kamala Harris
+    Investment Opportunities:
+    TSLA: 15.23% potential growth
+    ENPH: 12.45% potential growth
+    ...
+
+
+
+
+
+
