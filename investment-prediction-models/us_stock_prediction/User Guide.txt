@@ -8,7 +8,7 @@ Setup
     
     2. Input and Output Files
     #Navigate to investment-prediction-models/investment-prediction-models/us_stock_prediction/data_files in this Repository
-    #Download test data set "indicators_data_test.csv" and training data set indicators_data_train.csv
+    #Download test data set "indicators_data_test.csv" and training data set "indicators_data_train.csv"
     #Update the input file path by replacing "Insert Training File Path (xlsx)"
     #Create an output file and update its path by replacing "Insert Output File Location (xlsx)"
     
@@ -24,7 +24,7 @@ Model Learning Conditions
 
     train_df['Future_Return'] = train_df.groupby('Symbol')['Close'].shift(-NUMBER) / train_df['Close'] - 1
 
-    #Alternatively you can adjust the parameters at under Train XGBoost Model (line 42)
+    #Alternatively you can adjust the parameters under Train XGBoost Model (line 42)
     model = xgb.XGBRegressor(objective='reg:squarederror', n_estimators=300, learning_rate=0.05, max_depth=5)
 
 Trading Simulation
