@@ -1,5 +1,5 @@
 
-The output 2023_Portfolio_Trade_Sim.xlsx file contains every trade made by the Model
+The output 2023_Portfolio_Trades.xlsx file contains every trade made by the Model
 
 Output:
 Trade log saved to: Output File Location
