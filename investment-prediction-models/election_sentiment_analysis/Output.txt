@@ -1,0 +1,20 @@
+
+Output in Terminal:
+
+Positive Sentiment: 34
+Negative Sentiment: 25
+
+The likely winner based on sentiment is: Donald Trump
+
+Investment Opportunities:
+XOM: -0.28% potential growth 
+CVX: 0.50% potential growth  
+LMT: -6.87% potential growth 
+RTX: 0.63% potential growth  
+HON: 1.47% potential growth  
+GS: 7.00% potential growth   
+JPM: 9.33% potential growth  
+COIN: 26.76% potential growth
+AAPL: 1.93% potential growth 
+NVDA: 20.01% potential growth
+TSLA: 0.95% potential growth
