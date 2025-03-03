@@ -1,0 +1,57 @@
+This file explains the Goals that the models were built to accomplish as well as the approach
+
+
+                                                        //US Stock Prediction - Machine Learning Stock Prediction Model//
+Problem
+The goal is to develop a machine-learning model capable of predicting future stock prices using the parameters given to it. It will serve as a foundation for future projects, building towards 
+either a high-frequency trading model, a quantitative investment analysis tool, or an automated trading system. The core aim of the project is to enhance portfolio profitability and risk 
+management through not only automating aspects of the trading process but also improving the ability to analyze and interpret large datasets.
+
+Approach
+The model uses XGBoost Regressor,  leveraging historical stock price data along with key technical indicators, including RSI, Bollinger Bands, Stochastic Oscillator, ADX, and Money Flow Index. 
+These indicators were carefully selected for their ability to capture critical market signals. Specifically, they help identify momentum trends, assess market volume, and detect potential price 
+reversals. This combination enables the model to recognize patterns that influence future price actions. The model generates predictions by evaluating how the values of these individual indicators 
+and their interactions correlate with subsequent price movements.
+
+Trade Simulation
+A portfolio simulation is used to evaluate the performance of the model. Positions are opened when predicted returns are positive and closed when the predicted return turns negative or specific 
+risk thresholds are met. A trading log documented in an excel report captures entry and exit points, and the corresponding profit and loss for each trade. The final portfolio value and win/loss 
+ratio are computed and displayed in the terminal.  
+
+Limitations and Takeaways
+The model was functional and successfully generated $195,668.93 in profits from an initial $100,000. However, this outcome does not truly reflect its performance in live markets. It serves 
+primarily as a proof of concept, as the simulation operates with a complete and static set of information, unlike real markets where data and trends are constantly evolving. The model also 
+lacks consideration for fundamental analysis, and time and space complexities.
+
+
+
+                                                        //Election Sentiment Analysis - Market Insight Model//
+
+Problem
+The goal is to develop a sentiment analysis model that predicts the likely winner of the 2024 U.S. Presidential Election by analyzing public sentiment across social media, news platforms,
+and online discussions. Accurately identifying the candidate with stronger public support provides early insights that can be used to strategically position an investment portfolio in stocks 
+and industries expected to benefit from the winning candidate’s policies. This approach aims to bridge the gap between public sentiment and market opportunity, allowing for proactive investment 
+decisions ahead of major political outcomes.
+
+Approach
+The model collects and analyzes sentiment from three primary sources, Twitter, Reddit, and Google News, and by leveraging their respective APIs. It searches for mentions of Donald Trump and 
+Kamala Harris, aggregating a large dataset of public opinions. Using VADER (Valence Aware Dictionary and sEntiment Reasoner), the model classifies the sentiment of each text as positive, negative, 
+or neutral. The results are compiled and compared to determine the candidate with the strongest positive sentiment, a potential indicator of public favorability and electoral advantage. 
+
+To translate these predictions into investment insights, policy-aligned sectors are mapped to each candidate. For the candidate with greater positive sentiment, it retrieves stock performance 
+data for the corresponding sectors. The final output, displayed in the terminal,  includes the predicted winning candidate and a list of stocks with growth potential based on their performance 
+in the month leading up to the election results.
+
+Limitations and Takeaways
+The model successfully predicted Donald Trump’s victory in the 2024 U.S. Presidential Election, and subsequently, this insight was leveraged and provided significant returns in the stock market. 
+It enabled my team in the Bloomberg 2024 Trading Challenge to peak at 3rd place out of 36 teams in Singapore. However, the model faced limitations, particularly with API rate limits and data 
+access restrictions may have led to incomplete datasets and affected the robustness of predictions.
+
+
+
+
+
+
+
+
+
