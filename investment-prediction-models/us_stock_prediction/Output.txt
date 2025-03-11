@@ -3,7 +3,7 @@ The output 2023_Portfolio_Trades.xlsx file contains every trade made by the Mode
 
 Output in Terminal:
 Trade log saved to: Output File Location
-Final Portfolio Value: $403707.35
+Final Portfolio Value: $295668.93
 Total Profit: $195668.93
 Win/Loss Ratio: 113 / 61
 
