@@ -54,6 +54,7 @@ max_position = 0.20 * portfolio_value
 #max_trades = 0 #Remove Comment to Set limit on number of trades
 trade_log = []
 open_positions = {}
+total_profit = 0 #initialize
 
 #Simulate trading
 for symbol, stock_data in test_df.groupby('Symbol'):
@@ -114,14 +115,22 @@ final_test_date = test_df['Date'].max()
 for symbol, trade in open_positions.items():
     last_price = test_df[(test_df['Symbol'] == symbol) & (test_df['Date'] == final_test_date)]['Close']
     if not last_price.empty:
-        trade['Exit Price'] = last_price.values[0]
-        trade['Exit Date'] = final_test_date
-        trade['Profit & Loss'] = (trade['Exit Price'] - trade['Entry Price']) * (trade['Size of Position'] / trade['Entry Price'])
+        exit_price = last_price.values[0]
+        profit_loss = (exit_price - trade['Entry Price']) * (trade['Size of Position'] / trade['Entry Price'])
+        
+        # Update the total profit for final trades
+        total_profit += profit_loss
+
+        trade.update({
+            'Exit Date': final_test_date,
+            'Exit Price': exit_price,
+            'Profit & Loss': profit_loss
+        })
 
     trade_log.append(trade)
 
-#Final calculations
-portfolio_value += sum(trade['Profit & Loss'] for trade in trade_log)
+# Final calculations
+final_portfolio_value = 100000 + total_profit
 win_trades = [trade for trade in trade_log if trade['Profit & Loss'] > 0]
 loss_trades = [trade for trade in trade_log if trade['Profit & Loss'] <= 0]
 
@@ -130,7 +139,7 @@ trade_log_df = pd.DataFrame(trade_log)
 trade_log_df.to_excel(output_file, index=False)
 
 #Summary statistics
-print(f"Final Portfolio Value: ${portfolio_value:.2f}")
+print(f"Final Portfolio Value: ${final_portfolio_value:.2f}")
 print(f"Total Profit: ${sum(trade['Profit & Loss'] for trade in trade_log):.2f}")
 print(f"Win/Loss Ratio: {len(win_trades)} / {len(loss_trades)}")
 
