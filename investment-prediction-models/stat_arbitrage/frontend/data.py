@@ -15,8 +15,15 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Sequence
 
 import streamlit as st
-from dotenv import load_dotenv
 from supabase import Client, create_client
+
+try:
+    # Local development reads .env. On Streamlit Cloud the package may be
+    # absent and secrets come from st.secrets instead, so this is optional.
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover
+    def load_dotenv(*_args, **_kwargs) -> None:
+        return None
 
 from contract.enums import MarketStatus
 from contract.models import (

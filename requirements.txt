@@ -1,0 +1,9 @@
+# Repo-root requirements for the deployed Streamlit frontend.
+
+streamlit>=1.37
+plotly>=5.20
+pandas>=2.0
+numpy>=1.26
+supabase>=2.4
+python-dotenv>=1.0
+requests>=2.31

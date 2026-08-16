@@ -45,10 +45,10 @@ class DataSource(StrEnum):
     @property
     def badge(self) -> str:
         return {
-            DataSource.LIVE_IBKR: "● LIVE IBKR",
-            DataSource.SIMULATED_FEED: "⚠ SIMULATED FEED",
-            DataSource.HISTORICAL_DATA: "⚠ HISTORICAL DATA",
-            DataSource.DISCONNECTED: "✕ DISCONNECTED",
+            DataSource.LIVE_IBKR: "LIVE IBKR",
+            DataSource.SIMULATED_FEED: "SIMULATED FEED",
+            DataSource.HISTORICAL_DATA: "HISTORICAL DATA",
+            DataSource.DISCONNECTED: "DISCONNECTED",
         }[self]
 
 
@@ -77,9 +77,9 @@ class RelationshipHealth(StrEnum):
     def label(self) -> str:
         """Textual label so status never depends on colour alone."""
         return {
-            RelationshipHealth.VALID: "✓ RELATIONSHIP VALID",
-            RelationshipHealth.DEGRADED: "⚠ RELATIONSHIP DEGRADED",
-            RelationshipHealth.INVALID: "✕ RELATIONSHIP INVALID",
+            RelationshipHealth.VALID: "RELATIONSHIP VALID",
+            RelationshipHealth.DEGRADED: "RELATIONSHIP DEGRADED",
+            RelationshipHealth.INVALID: "RELATIONSHIP INVALID",
         }[self]
 
 

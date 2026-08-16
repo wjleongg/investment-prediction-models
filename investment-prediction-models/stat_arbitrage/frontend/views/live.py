@@ -74,7 +74,7 @@ def overview(header: HeaderState) -> None:
                 c.pill(m.health.label, c.HEALTH_TONE.get(m.health, "mute")),
                 unsafe_allow_html=True)
             if live.market_data_is_stale():
-                c.banner("⚠ Market data is stale.", "warn")
+                c.banner("Market data is stale.", "warn")
         else:
             c.empty_state("live pair state", "Engine has not written live_state.")
 
@@ -140,7 +140,7 @@ def overview(header: HeaderState) -> None:
                    else "v-neu"),
         ])
         for breach in analytics.limit_breaches(exposure):
-            c.banner(f"⚠ {breach}", "bad")
+            c.banner(f"{breach}", "bad")
         if exposure["is_flat"]:
             st.caption("Currently flat. Limits shown are the headroom "
                        "available to the next position.")
