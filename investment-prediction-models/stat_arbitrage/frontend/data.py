@@ -66,7 +66,13 @@ def _secret(name: str) -> str | None:
 
 
 @st.cache_resource
-def get_client() -> Client:
+def _public_client() -> Client:
+    """Anonymous client for public reads.
+
+    Cached, therefore SHARED ACROSS ALL SESSIONS. It must never have a user
+    session attached to it — signing in on a cached client would grant every
+    other visitor the signed-in user's privileges.
+    """
     url, key = _secret("SUPABASE_URL"), _secret("SUPABASE_ANON_KEY")
     if not url or not key:
         st.error("SUPABASE_URL / SUPABASE_ANON_KEY not configured.")
@@ -74,27 +80,45 @@ def get_client() -> Client:
     return create_client(url, key)
 
 
+def _session_client() -> Client | None:
+    """Per-session authenticated client, created fresh on sign-in."""
+    return st.session_state.get("_auth_client")
+
+
+def get_client() -> Client:
+    """Authenticated client when this session has signed in, else anonymous."""
+    return _session_client() or _public_client()
+
+
 def sign_in(email: str, password: str) -> tuple[bool, str]:
+    """Authenticate into a session-scoped client, never the cached one."""
+    url, key = _secret("SUPABASE_URL"), _secret("SUPABASE_ANON_KEY")
     try:
-        res = get_client().auth.sign_in_with_password(
+        client = create_client(url, key)          # deliberately uncached
+        res = client.auth.sign_in_with_password(
             {"email": email, "password": password})
-        return (res.user is not None), (res.user.email if res.user else "")
+        if res.user is None:
+            return False, "no user returned"
+        st.session_state["_auth_client"] = client
+        st.session_state["user_email"] = res.user.email
+        return True, res.user.email
     except Exception as e:
         return False, str(e)
 
 
 def sign_out() -> None:
-    try:
-        get_client().auth.sign_out()
-    except Exception:
-        pass
+    client = _session_client()
+    if client:
+        try:
+            client.auth.sign_out()
+        except Exception:
+            pass
+    st.session_state.pop("_auth_client", None)
+    st.session_state.pop("user_email", None)
 
 
 def is_authenticated() -> bool:
-    try:
-        return get_client().auth.get_session() is not None
-    except Exception:
-        return False
+    return _session_client() is not None
 
 
 def _t(table: str):

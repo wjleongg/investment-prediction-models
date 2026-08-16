@@ -39,43 +39,46 @@ PAGES = {
 }
 
 
-def login_gate() -> bool:
-    """Row Level Security requires an authenticated session."""
-    if st.session_state.get("authenticated"):
-        return True
+# Pages that can change system state require an authenticated session.
+PROTECTED = {"Trades","Configuration", "Controls"}
 
-    st.markdown("<div style='height:12vh'></div>", unsafe_allow_html=True)
-    _, mid, _ = st.columns([1, 1.1, 1])
+
+def sign_in_panel(reason: str) -> None:
+    """Inline sign-in shown only when a protected page is opened."""
+    _, mid, _ = st.columns([1, 1.4, 1])
     with mid:
-        st.markdown("<div class='hdr'><span class='brand'>STAT ARB ENGINE</span>"
-                    "</div>", unsafe_allow_html=True)
-        st.caption("Operator sign-in required. Reads and controls are gated by "
-                   "Row Level Security.")
+        c.banner(reason, "warn")
         with st.form("login"):
             email = st.text_input("Email")
             password = st.text_input("Password", type="password")
             if st.form_submit_button("Sign in", use_container_width=True):
                 ok, detail = data.sign_in(email, password)
                 if ok:
-                    st.session_state["authenticated"] = True
-                    st.session_state["user_email"] = detail
                     st.rerun()
                 else:
                     st.error(f"Sign-in failed: {detail}")
-    return False
+        st.caption("Read-only pages need no sign-in. Authentication is "
+                   "required only to change configuration or issue commands.")
 
 
 def main() -> None:
-    if not login_gate():
-        return
-
     header = data.fetch_header_state()
     c.render_header(header)
 
-    nav, actions = st.columns([6, 1])
+    nav, auth, actions = st.columns([6, 1.2, 1])
     with nav:
         page = st.radio("Navigation", list(PAGES.keys()), horizontal=True,
                         label_visibility="collapsed", key="nav")
+    with auth:
+        if data.is_authenticated():
+            if st.button("Sign out", use_container_width=True):
+                data.sign_out()
+                st.rerun()
+        else:
+            st.markdown(
+                "<div style='font-family:monospace;font-size:.68rem;"
+                "color:#7d8590;padding-top:.45rem;text-align:center'>"
+                "READ ONLY</div>", unsafe_allow_html=True)
     with actions:
         if st.button("↻ Refresh", use_container_width=True):
             data.clear_caches()
@@ -84,6 +87,12 @@ def main() -> None:
     if header is None:
         c.banner("No pair is configured. Insert a row into `pairs` and mark it "
                  "active.", "bad")
+        return
+
+    if page in PROTECTED and not data.is_authenticated():
+        c.section(page)
+        sign_in_panel(f"{page} can change live system state. Sign in to "
+                      f"continue.")
         return
 
     render, refresh = PAGES[page]
@@ -97,10 +106,11 @@ def main() -> None:
     else:
         render(header)
 
+    user = st.session_state.get("user_email")
     st.markdown(
         f"<div style='margin-top:2rem;color:#7d8590;font-size:.68rem;"
         f"font-family:monospace;border-top:1px solid #272e38;padding-top:.6rem'>"
-        f"Signed in as {st.session_state.get('user_email', '—')} · "
+        f"{'Signed in as ' + user if user else 'Read-only session'} · "
         f"Streamlit is the monitoring layer; the Python engine is the source "
         f"of truth.</div>", unsafe_allow_html=True)
 
