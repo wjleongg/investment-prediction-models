@@ -33,19 +33,26 @@ class SystemStatus(StrEnum):
 
 class DataSource(StrEnum):
     LIVE_IBKR = "LIVE_IBKR"
+    DELAYED_IBKR = "DELAYED_IBKR"
     SIMULATED_FEED = "SIMULATED_FEED"
     HISTORICAL_DATA = "HISTORICAL_DATA"
     DISCONNECTED = "DISCONNECTED"
 
     @property
     def is_live(self) -> bool:
-        """Drives the SIMULATED FEED badge. Only true IBKR counts as live."""
+        """Drives the feed badge. Only real-time IBKR counts as live.
+
+        Delayed data is real market data but roughly 15 minutes stale, which
+        is not tradeable for a short half-life strategy. It must never be
+        presented as live.
+        """
         return self is DataSource.LIVE_IBKR
 
     @property
     def badge(self) -> str:
         return {
             DataSource.LIVE_IBKR: "LIVE IBKR",
+            DataSource.DELAYED_IBKR: "DELAYED IBKR (~15 min)",
             DataSource.SIMULATED_FEED: "SIMULATED FEED",
             DataSource.HISTORICAL_DATA: "HISTORICAL DATA",
             DataSource.DISCONNECTED: "DISCONNECTED",
