@@ -51,10 +51,19 @@ from contract.models import (
 
 load_dotenv()
 
-TTL_LIVE = 1
+# Cache lifetimes, chosen for egress cost as much as freshness.
+# live_state is a single row (~1KB) so a 1s TTL is cheap. Chart history is
+# hundreds of rows, so refetching it every second would cost ~720MB/hour per
+# viewer and exhaust a free-tier egress budget in a single session.
+TTL_LIVE = 1        # single-row reads only
+TTL_SERIES = 30     # chart history
 TTL_DIAG = 5
-TTL_SLOW = 30
-TTL_RESEARCH = 300
+TTL_SLOW = 60
+TTL_RESEARCH = 600
+
+# Hard caps so a long-running engine cannot make a page fetch unbounded rows.
+MAX_CHART_POINTS = 1500
+MAX_LOG_LINES = 200
 
 
 # ---------------------------------------------------------------------
@@ -261,10 +270,15 @@ TIMEFRAMES: dict[str, timedelta | None] = {
 }
 
 
-@st.cache_data(ttl=TTL_LIVE)
+@st.cache_data(ttl=TTL_SERIES)
 def fetch_model_history(pair_id: int, window: str = "1M",
-                        max_points: int = 4000) -> list[ModelStatePoint]:
+                        max_points: int = MAX_CHART_POINTS,
+                        bar_interval: str | None = None) -> list[ModelStatePoint]:
     q = _t("model_state_history").select("*").eq("pair_id", pair_id)
+    if bar_interval:
+        # Daily backfill and intraday live data are different timescales and
+        # must never be mixed in one series.
+        q = q.eq("bar_interval", bar_interval)
     delta = TIMEFRAMES.get(window)
     if delta is not None:
         cutoff = (datetime.now(timezone.utc) - delta).isoformat()
@@ -274,7 +288,7 @@ def fetch_model_history(pair_id: int, window: str = "1M",
 
 
 @st.cache_data(ttl=TTL_RESEARCH)
-def fetch_price_series(pair_id: int, limit: int = 5000) -> list[dict]:
+def fetch_price_series(pair_id: int, limit: int = 3000) -> list[dict]:
     return (_t("market_data").select("ts,ticker,price")
             .eq("pair_id", pair_id).order("ts", desc=True)
             .limit(limit).execute().data or [])
@@ -346,7 +360,7 @@ def fetch_performance(pair_id: int, period: str = "ALL") -> PerformanceMetrics |
 
 @st.cache_data(ttl=TTL_DIAG)
 def fetch_logs(levels: Sequence[str] = (), categories: Sequence[str] = (),
-               limit: int = 300) -> list[LogEntry]:
+               limit: int = MAX_LOG_LINES) -> list[LogEntry]:
     q = _t("system_logs").select("*")
     if levels:
         q = q.in_("level", list(levels))

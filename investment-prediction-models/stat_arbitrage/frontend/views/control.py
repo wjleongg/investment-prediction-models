@@ -283,37 +283,65 @@ def _request(cmd: CommandType, pair_id: int, confirm: bool) -> None:
 
 
 def _render_lifecycle(command_id: str) -> None:
-    """Poll briefly for the engine's acknowledgement."""
+    """Follow a command until it settles.
+
+    Polls to EXECUTED / FAILED / EXPIRED rather than stopping at the first
+    status change. The engine moves through RECEIVED and ACKNOWLEDGED in well
+    under a second, so breaking early renders a stale intermediate state and
+    makes a completed command look stuck.
+    """
     placeholder = st.empty()
-    deadline = time.time() + 3
+    deadline = time.time() + COMMAND_CONFIRM_TIMEOUT_SECONDS
     cmd = None
+
     while time.time() < deadline:
         cmd = data.fetch_command(command_id)
-        if cmd and cmd.status != CommandStatus.REQUESTED:
-            break
+        if cmd is not None:
+            placeholder.markdown(_lifecycle_chips(cmd), unsafe_allow_html=True)
+            if cmd.status.is_settled:
+                break
         time.sleep(0.5)
 
     if cmd is None:
         placeholder.error("Command row could not be read back.")
         return
 
+    placeholder.markdown(_lifecycle_chips(cmd), unsafe_allow_html=True)
     now = datetime.now(timezone.utc)
-    stages = [("REQUESTED", cmd.requested_at), ("RECEIVED", cmd.received_at),
-              ("ACKNOWLEDGED", cmd.acknowledged_at), ("EXECUTED", cmd.executed_at)]
-    chips = " ".join(
-        c.pill(f"{name} {c.ts(t) if t else '—'}", "ok" if t else "mute")
-        for name, t in stages)
-    placeholder.markdown(chips, unsafe_allow_html=True)
 
     if cmd.status == CommandStatus.FAILED:
         c.banner(f"✕ ENGINE REPORTED FAILURE: {cmd.error_message or 'no detail'}",
                  "bad")
+    elif cmd.status == CommandStatus.EXPIRED:
+        c.banner(f"⚠ COMMAND EXPIRED — the engine did not collect it before "
+                 f"it timed out. It was NOT executed.", "bad")
+    elif cmd.status == CommandStatus.EXECUTED:
+        detail = ""
+        if cmd.result:
+            detail = " · " + ", ".join(f"{k}={v}" for k, v in cmd.result.items())
+        c.banner(f"✓ ENGINE EXECUTED{detail}", "ok")
     elif cmd.is_unconfirmed_and_expired(now):
         c.banner(f"⚠ NOT CONFIRMED BY ENGINE after "
                  f"{COMMAND_CONFIRM_TIMEOUT_SECONDS:.0f}s. The command may not "
                  f"have executed. Verify engine state before acting on this.",
                  "bad")
-    elif cmd.is_confirmed:
-        c.banner(f"✓ ENGINE {cmd.status.value}", "ok")
+    elif cmd.status == CommandStatus.ACKNOWLEDGED:
+        c.banner("⧗ Engine acknowledged the command and is executing it.",
+                 "warn")
     else:
-        c.banner("⧗ Awaiting engine acknowledgement — not yet confirmed.", "warn")
+        c.banner("⧗ Awaiting engine acknowledgement — not yet confirmed.",
+                 "warn")
+
+    data.fetch_recent_commands.clear()
+
+
+def _lifecycle_chips(cmd) -> str:
+    """REQUESTED -> RECEIVED -> ACKNOWLEDGED -> EXECUTED as timestamped chips."""
+    stages = [("REQUESTED", cmd.requested_at), ("RECEIVED", cmd.received_at),
+              ("ACKNOWLEDGED", cmd.acknowledged_at),
+              ("EXECUTED", cmd.executed_at)]
+    tone_done = "bad" if cmd.status in (CommandStatus.FAILED,
+                                        CommandStatus.EXPIRED) else "ok"
+    return " ".join(
+        c.pill(f"{name} {c.ts(t) if t else '—'}", tone_done if t else "mute")
+        for name, t in stages)

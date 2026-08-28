@@ -224,8 +224,8 @@ class IBKRSource(MarketDataSource):
         self._ib.errorEvent += handler
 
     def historical_pair(self, ticker1: str, ticker2: str,
-                        lookback: str = "1 D",
-                        bar_size: str = "1 min") -> PairQuote | None:
+                        lookback: str = "1 D", bar_size: str = "1 min",
+                        completed_only: bool = True) -> PairQuote | None:
         """Latest synchronised bar from historical data.
 
         Fallback feed when streaming quotes are unavailable: reqHistoricalData
@@ -236,7 +236,24 @@ class IBKRSource(MarketDataSource):
         b2 = self.historical(ticker2, lookback, bar_size)
         if not b1 or not b2:
             return None
-        return PairQuote(ts=max(b1[-1].ts, b2[-1].ts), leg1=b1[-1], leg2=b2[-1])
+
+        if completed_only:
+            # The final bar is the in-progress minute: its close moves until
+            # the minute ends. Emitting it would record a partial-minute price
+            # that is never corrected, so step back to the last closed bar.
+            if len(b1) < 2 or len(b2) < 2:
+                return None
+            b1, b2 = b1[:-1], b2[:-1]
+
+        # Align on a shared timestamp so the spread is never computed from
+        # two different minutes.
+        by_ts1 = {q.ts: q for q in b1}
+        by_ts2 = {q.ts: q for q in b2}
+        common = sorted(set(by_ts1) & set(by_ts2))
+        if not common:
+            return None
+        ts = common[-1]
+        return PairQuote(ts=ts, leg1=by_ts1[ts], leg2=by_ts2[ts])
 
     def stream(self, ticker1: str, ticker2: str) -> Iterator[PairQuote]:
         """Yield a synchronised pair quote on each bar interval.
@@ -361,8 +378,8 @@ class IBKRPollingSource(IBKRSource):
 
         while not self._stop.is_set():
             try:
-                pq = self.historical_pair(ticker1, ticker2,
-                                          self.lookback, self.bar_size)
+                pq = self.historical_pair(ticker1, ticker2, self.lookback,
+                                          self.bar_size, completed_only=True)
             except Exception:
                 pq = None
 
