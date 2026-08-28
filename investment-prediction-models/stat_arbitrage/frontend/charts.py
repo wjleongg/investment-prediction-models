@@ -144,7 +144,6 @@ def histogram(values: Sequence[float], label: str, height: int = 280,
     vals = [v for v in values if v is not None and not pd.isna(v)]
     if not vals:
         return fig
-    colours = [POS if v >= 0 else NEG for v in vals]
     fig.add_trace(go.Histogram(x=vals, nbinsx=bins,
                                marker=dict(color=ACCENT, line=dict(width=0))))
     fig.add_vline(x=float(np.mean(vals)), line=dict(color=WARN, width=1,
@@ -209,4 +208,139 @@ def mini_trade_chart(points: Sequence[ModelStatePoint], trade: Trade,
         fig.add_trace(go.Scatter(x=[trade.exit_time], y=[trade.exit_zscore],
                                  mode="markers", name="Exit",
                                  marker=dict(symbol="x", size=10, color=WARN)))
+    return fig
+
+
+# ---------------------------------------------------------------------
+# Pair diagnostics
+# ---------------------------------------------------------------------
+
+
+def returns_scatter(diffs1: Sequence[float], diffs2: Sequence[float],
+                    leg1: str, leg2: str, beta: float | None = None,
+                    height: int = 340) -> go.Figure:
+    """Bar-to-bar changes of one leg against the other.
+
+    A tight diagonal cloud means the legs move together — correlation. It
+    says nothing about whether the levels stay tethered, which is
+    cointegration and the property actually being traded. A pair can show
+    either without the other.
+    """
+    fig = _fig(height, xaxis_title=f"{leg2} change",
+               yaxis_title=f"{leg1} change", hovermode="closest")
+    if not diffs1 or not diffs2:
+        return fig
+    fig.add_trace(go.Scatter(
+        x=list(diffs2), y=list(diffs1), mode="markers", name="Bar changes",
+        marker=dict(size=4, color=ACCENT, opacity=0.45,
+                    line=dict(width=0))))
+    if beta is not None and diffs2:
+        lo, hi = min(diffs2), max(diffs2)
+        fig.add_trace(go.Scatter(
+            x=[lo, hi], y=[beta * lo, beta * hi], mode="lines",
+            name=f"fit (beta {beta:.3f})",
+            line=dict(color=WARN, width=1.5, dash="dash")))
+    fig.add_hline(y=0, line=dict(color=BORDER, width=1))
+    fig.add_vline(x=0, line=dict(color=BORDER, width=1))
+    return fig
+
+
+def spread_distribution(spreads: Sequence[float], mean: float, std: float,
+                        entry: float, exit_: float,
+                        height: int = 320) -> go.Figure:
+    """Where the spread actually spends its time, against the thresholds.
+
+    Shows directly how much of the distribution lies beyond the entry
+    threshold — that is, how often the strategy would trade at all.
+    """
+    fig = _fig(height, xaxis_title="Spread", yaxis_title="Observations",
+               hovermode="closest")
+    values = [v for v in spreads if v is not None]
+    if not values or std <= 0:
+        return fig
+    fig.add_trace(go.Histogram(x=values, nbinsx=60,
+                               marker=dict(color=ACCENT, line=dict(width=0)),
+                               name="Spread"))
+    fig.add_vline(x=mean, line=dict(color=MUTED, width=1.5),
+                  annotation_text="mean", annotation_font=dict(size=9))
+    for k, colour, label in ((entry, NEG, "entry"), (-entry, POS, "entry"),
+                             (exit_, MUTED, "exit"), (-exit_, MUTED, "exit")):
+        fig.add_vline(x=mean + k * std,
+                      line=dict(color=colour, width=1, dash="dot"),
+                      annotation_text=f"{label} {k:+g}σ",
+                      annotation_font=dict(size=8, color=colour))
+    return fig
+
+
+def tradeability_chart(t: dict, height: int = 260) -> go.Figure:
+    """Gross move per round trip against the cost of capturing it."""
+    fig = _fig(height, yaxis_title="$ per round trip", hovermode="closest")
+    if not t:
+        return fig
+    gross = t["gross_profit_per_trade"]
+    spread_cost = t["spread_cost_per_trade"]
+    commission = t.get("commission_per_trade", 0.0)
+    net = t["net_profit_per_trade"]
+
+    fig.add_trace(go.Bar(x=["Gross move"], y=[gross], name="Gross",
+                         marker=dict(color=ACCENT),
+                         text=[f"${gross:.2f}"], textposition="outside"))
+    fig.add_trace(go.Bar(x=["Cost"], y=[spread_cost], name="Quoted spread",
+                         marker=dict(color=NEG),
+                         text=[f"${spread_cost:.2f}"], textposition="outside"))
+    if commission:
+        fig.add_trace(go.Bar(x=["Cost"], y=[commission], name="Commission",
+                             marker=dict(color=WARN)))
+    fig.add_trace(go.Bar(x=["Net"], y=[net], name="Net",
+                         marker=dict(color=POS if net > 0 else NEG),
+                         text=[f"${net:.2f}"], textposition="outside"))
+    fig.update_layout(barmode="stack", showlegend=True)
+    fig.add_hline(y=0, line=dict(color=MUTED, width=1))
+    return fig
+
+
+def spread_acf(spreads: Sequence[float], max_lag: int = 40,
+               height: int = 260) -> go.Figure:
+    """Autocorrelation of the spread — how fast it forgets a dislocation.
+
+    Fast decay is mean reversion. Slow decay means the spread wanders, and a
+    z-score entry is betting on a reversion that may not come.
+    """
+    fig = _fig(height, xaxis_title="Lag (bars)", yaxis_title="Autocorrelation",
+               hovermode="closest")
+    values = np.asarray([v for v in spreads if v is not None], dtype=float)
+    if len(values) < max_lag * 2:
+        max_lag = max(5, len(values) // 4)
+    if len(values) < 10:
+        return fig
+    centred = values - values.mean()
+    denom = float(np.dot(centred, centred))
+    if denom == 0:
+        return fig
+    acf = [float(np.dot(centred[:-lag], centred[lag:]) / denom)
+           for lag in range(1, max_lag + 1)]
+    fig.add_trace(go.Bar(x=list(range(1, max_lag + 1)), y=acf, name="ACF",
+                         marker=dict(color=ACCENT)))
+    band = 1.96 / np.sqrt(len(values))
+    for sign in (1, -1):
+        fig.add_hline(y=sign * band, line=dict(color=MUTED, width=1,
+                                               dash="dot"))
+    fig.add_hline(y=0, line=dict(color=BORDER, width=1))
+    return fig
+
+
+def threshold_heatmap(grid: dict, height: int = 340) -> go.Figure:
+    """Entry against exit threshold, coloured by net profit per round trip.
+
+    A 2D heatmap rather than a 3D surface: values are readable off the axes
+    and nothing is hidden behind a peak.
+    """
+    fig = _fig(height, xaxis_title="Exit threshold (σ)",
+               yaxis_title="Entry threshold (σ)", hovermode="closest")
+    if not grid:
+        return fig
+    fig.add_trace(go.Heatmap(
+        x=grid["exits"], y=grid["entries"], z=grid["net"],
+        colorscale=[[0, NEG], [0.5, "#161b22"], [1, POS]], zmid=0,
+        colorbar=dict(title="$/trade", thickness=12)))
     return fig

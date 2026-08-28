@@ -139,6 +139,63 @@ def research(header: HeaderState) -> None:
     else:
         c.empty_state("hedge ratio history")
 
+    # --- Correlation vs cointegration ----------------------------------
+    c.section("Correlation vs cointegration")
+    st.caption("Correlation describes whether the legs move together bar to "
+               "bar. Cointegration describes whether their levels stay "
+               "tethered. Only the second is what a pairs strategy trades, "
+               "and a pair can show either without the other.")
+    if rows and len(wide) > 20:
+        rel = analytics.returns_relationship(wide[cols[0]].tolist(),
+                                             wide[cols[1]].tolist())
+        if rel:
+            a, b = st.columns([2, 1], gap="medium")
+            with a:
+                st.plotly_chart(
+                    charts.returns_scatter(rel["leg1_diffs"], rel["leg2_diffs"],
+                                           cols[0], cols[1],
+                                           rel["returns_beta"]),
+                    use_container_width=True, key="rs_scatter")
+            with b:
+                c.kv_block([
+                    ("Correlation of changes", c.num(rel["returns_correlation"])),
+                    ("Beta of changes", c.num(rel["returns_beta"], 4)),
+                    ("R²", c.num(rel["r_squared"])),
+                    ("Residual std", c.num(rel["residual_std"], 5)),
+                ])
+                st.caption("A tight diagonal means co-movement. It does not "
+                           "by itself mean the spread is stationary.")
+
+    # --- Spread distribution -------------------------------------------
+    if points and cfg:
+        c.section("Spread distribution")
+        spreads = [p.spread for p in points]
+        mean = float(np.mean(spreads))
+        std = float(np.std(spreads))
+        st.plotly_chart(
+            charts.spread_distribution(spreads, mean, std,
+                                       cfg.entry_threshold,
+                                       cfg.exit_threshold),
+            use_container_width=True, key="rs_dist")
+        beyond = sum(1 for v in spreads
+                     if abs(v - mean) >= cfg.entry_threshold * std)
+        st.caption(f"{beyond} of {len(spreads):,} observations "
+                   f"({100 * beyond / len(spreads):.1f}%) lie beyond the "
+                   f"±{cfg.entry_threshold:g}σ entry threshold — that is how "
+                   f"often this configuration would trade at all.")
+
+        c.section("Spread autocorrelation")
+        st.plotly_chart(charts.spread_acf(spreads),
+                        use_container_width=True, key="rs_acf")
+        st.caption("Fast decay toward zero is mean reversion. Bars inside the "
+                   "dotted band are indistinguishable from noise.")
+
+    # --- Tradeability ---------------------------------------------------
+    c.section("Tradeability")
+    st.caption("Statistical validity is necessary but not sufficient. This "
+               "compares what a round trip earns against what it costs.")
+    trade_info = _tradeability_panel(pair, cfg, points)
+
     # --- Mean reversion -----------------------------------------------
     c.section("Mean reversion diagnostics")
     hls = [r.half_life for r in rolling if r.half_life is not None]
@@ -160,6 +217,168 @@ def research(header: HeaderState) -> None:
                      "tradeability.", "warn")
     else:
         c.empty_state("mean reversion diagnostics")
+
+    _research_commentary(pair, cfg, points, tests, rolling, trade_info)
+
+
+def _tradeability_panel(pair, cfg, points) -> dict:
+    """Gross move per round trip against quoted-spread cost."""
+    if not cfg or not points:
+        c.empty_state("tradeability inputs", "Needs config and spread history.")
+        return {}
+
+    last = points[-1]
+    spread_std = last.spread_std or float(np.std([p.spread for p in points]))
+    live = data.fetch_live_state(pair.id)
+
+    # Quoted spreads are unavailable on a bar feed, so they are entered here.
+    a, b, cc = st.columns(3)
+    default1 = 1.0
+    default2 = 3.0
+    if live and live.leg1_bid and live.leg1_ask:
+        default1 = round((live.leg1_ask - live.leg1_bid) * 100, 2)
+    if live and live.leg2_bid and live.leg2_ask:
+        default2 = round((live.leg2_ask - live.leg2_bid) * 100, 2)
+
+    s1 = a.number_input(f"{pair.leg1_ticker} quoted spread (cents)",
+                        0.01, 100.0, float(default1), 0.5)
+    s2 = b.number_input(f"{pair.leg2_ticker} quoted spread (cents)",
+                        0.01, 100.0, float(default2), 0.5)
+    comm = cc.number_input("Commission per share ($)", 0.0, 0.05, 0.0, 0.001,
+                           format="%.3f")
+
+    t = analytics.tradeability(
+        spread_std=spread_std,
+        entry_threshold=cfg.entry_threshold, exit_threshold=cfg.exit_threshold,
+        leg1_price=last.leg1_price or 1.0, leg2_price=last.leg2_price or 1.0,
+        max_position_size=float(cfg.max_position_size),
+        leg1_spread_cents=s1, leg2_spread_cents=s2,
+        hedge_ratio=last.hedge_ratio or 1.0, commission_per_share=comm)
+
+    if not t:
+        c.empty_state("tradeability", "Insufficient price or spread data.")
+        return {}
+
+    verdict, explanation = analytics.tradeability_verdict(t)
+    tone = {"TRADEABLE": "ok", "MARGINAL": "warn", "BARELY VIABLE": "warn",
+            "NOT TRADEABLE": "bad"}.get(verdict, "mute")
+
+    c.card_row([
+        c.card("Verdict", verdict, "", {"ok": "v-pos", "warn": "v-neu",
+                                        "bad": "v-neg"}.get(tone, "v-neu")),
+        c.card("Gross per trade", c.money(t["gross_profit_per_trade"]),
+               f"{t['captured_sigma']:.1f}σ captured"),
+        c.card("Cost per trade", c.money(t["total_cost_per_trade"]),
+               "quoted spread + commission", "v-neg"),
+        c.card("Net per trade", c.money(t["net_profit_per_trade"]), "",
+               c.sign_class(t["net_profit_per_trade"])),
+    ])
+    c.banner(explanation, tone)
+
+    left, right = st.columns([1, 1], gap="medium")
+    with left:
+        st.plotly_chart(charts.tradeability_chart(t),
+                        use_container_width=True, key="rs_trade")
+    with right:
+        c.kv_block([
+            ("Shares per leg", f"{t['quantity_leg1']:g} / "
+                               f"{t['quantity_leg2']:g}"),
+            ("Gross notional", c.money(t["gross_notional"], 0)),
+            ("Spread σ (price)", c.num(spread_std, 5)),
+            ("Captured move", c.num(t["captured_move_price"], 5)),
+            ("Breakeven entry", f"{t['entry_threshold_needed']:.2f}σ"),
+            ("Edge ratio", c.num(t["edge_ratio"], 2)),
+            ("Net bps of notional", c.num(t["profit_bps_of_notional"], 3)),
+        ])
+        if t["entry_threshold_needed"] > cfg.entry_threshold:
+            st.caption(f"Entry is configured at {cfg.entry_threshold:g}σ but "
+                       f"breakeven needs {t['entry_threshold_needed']:.2f}σ.")
+    return t
+
+
+def _research_commentary(pair, cfg, points, tests, rolling, trade_info) -> None:
+    """Narrative over the computed diagnostics."""
+    c.section("Interpretation")
+
+    facts = {
+        "pair": pair.label,
+        "data_basis": "Historical and live bars persisted by the engine.",
+        "statistical_tests": [
+            {"test": t.test.display_name, "statistic": t.statistic,
+             "pvalue": t.pvalue, "passed": t.passed} for t in tests],
+        "tradeability": trade_info or {},
+    }
+    if cfg:
+        facts["configuration"] = {
+            "entry_threshold": cfg.entry_threshold,
+            "exit_threshold": cfg.exit_threshold,
+            "stop_loss_threshold": cfg.stop_loss_threshold,
+            "min_correlation": cfg.min_correlation,
+            "max_cointegration_pvalue": cfg.max_cointegration_pvalue,
+            "max_position_size": float(cfg.max_position_size),
+        }
+    if points:
+        spreads = [p.spread for p in points]
+        facts["spread"] = {
+            "observations": len(spreads),
+            "mean": round(float(np.mean(spreads)), 6),
+            "std": round(float(np.std(spreads)), 6),
+            "latest_zscore": round(points[-1].zscore, 4),
+            "half_life_bars": points[-1].half_life,
+            "hedge_ratio": points[-1].hedge_ratio,
+        }
+    if rolling:
+        corrs = [r.rolling_correlation for r in rolling
+                 if r.rolling_correlation is not None]
+        valid = [r for r in rolling if r.relationship_valid]
+        facts["stability"] = {
+            "windows": len(rolling),
+            "windows_cointegrated_pct": (round(100 * len(valid) / len(rolling), 1)
+                                         if rolling else None),
+            "correlation_min": round(min(corrs), 5) if corrs else None,
+            "correlation_max": round(max(corrs), 5) if corrs else None,
+        }
+
+    warnings: list[str] = []
+    if trade_info and not trade_info.get("is_tradeable", True):
+        warnings.append(analytics.tradeability_verdict(trade_info)[1])
+    if points and points[-1].half_life and points[-1].half_life < 2:
+        warnings.append(
+            f"Half-life is {points[-1].half_life:.1f} bars, shorter than the "
+            f"sampling interval, so reversion completes before the data "
+            f"resolves it.")
+    facts["deterministic_warnings"] = warnings
+
+    for w in warnings:
+        c.banner(f"⚠ {w}", "warn")
+
+    providers = insights.available_providers()
+    ctrl, btn = st.columns([2, 1])
+    provider = ctrl.selectbox(
+        "Model", (providers + ["rule-based"]) if providers else ["rule-based"],
+        key="rs_model")
+    if btn.button("Interpret", use_container_width=True, key="rs_gen"):
+        with st.spinner("Interpreting…"):
+            text, used = insights.generate(
+                facts, None if provider == "rule-based" else provider,
+                kind="research")
+        st.session_state["research_text"] = text
+        st.session_state["research_provider"] = used
+
+    if st.session_state.get("research_text"):
+        st.markdown(
+            f"<div style='background:#161b22;border:1px solid #272e38;"
+            f"border-radius:4px;padding:1rem;white-space:pre-wrap;"
+            f"font-size:.82rem;line-height:1.55'>"
+            f"{st.session_state['research_text']}</div>",
+            unsafe_allow_html=True)
+        st.caption(f"Generated by "
+                   f"{st.session_state.get('research_provider')}. Every figure "
+                   f"is computed by engine/analytics.py; the model writes "
+                   f"narrative over them and cannot derive its own numbers.")
+
+    with st.expander("Fact pack sent to the model"):
+        st.json(facts, expanded=False)
 
 
 # =====================================================================

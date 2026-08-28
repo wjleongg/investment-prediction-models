@@ -10,6 +10,7 @@ Pure functions over typed models. No I/O, no Streamlit, no network.
 
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any, Sequence
@@ -325,3 +326,126 @@ def build_fact_pack(*, pair_label: str, config, performance, attr: dict,
     pack["deterministic_warnings"] = (
         concentration_flags(attr) if attr else []) + limit_breaches(exposure or {})
     return pack
+
+
+# =====================================================================
+# Tradeability — the question the Research page exists to answer
+# =====================================================================
+
+
+def tradeability(*, spread_std: float, entry_threshold: float,
+                 exit_threshold: float, leg1_price: float, leg2_price: float,
+                 max_position_size: float, leg1_spread_cents: float,
+                 leg2_spread_cents: float, hedge_ratio: float = 1.0,
+                 commission_per_share: float = 0.0) -> dict[str, Any]:
+    """Compare what a round trip earns against what it costs.
+
+    Correlation and cointegration establish that a relationship exists. They
+    say nothing about whether the dislocation is larger than the cost of
+    trading it, which is the only question that determines profitability.
+
+    Captured move is (entry - exit) standard deviations of the spread. Cost
+    assumes crossing half the quoted spread on entry and half on exit, on
+    both legs — the full quoted spread per leg per round trip.
+    """
+    if spread_std <= 0 or leg1_price <= 0 or leg2_price <= 0:
+        return {}
+
+    qty1 = math.floor(max_position_size / leg1_price)
+    qty2 = math.floor(qty1 * hedge_ratio)
+    if qty1 <= 0 or qty2 <= 0:
+        return {}
+
+    captured_sigma = max(entry_threshold - exit_threshold, 0.0)
+    captured_move = captured_sigma * spread_std          # in price units
+    gross_profit = qty1 * captured_move
+
+    spread_cost = (qty1 * leg1_spread_cents / 100.0
+                   + qty2 * leg2_spread_cents / 100.0)
+    commission = (qty1 + qty2) * commission_per_share * 2
+    total_cost = spread_cost + commission
+    net = gross_profit - total_cost
+    notional = qty1 * leg1_price + qty2 * leg2_price
+
+    # How wide the spread would have to move for the trade to break even.
+    breakeven_sigma = (total_cost / (qty1 * spread_std)
+                       if qty1 * spread_std > 0 else float("inf"))
+
+    return {
+        "quantity_leg1": qty1,
+        "quantity_leg2": qty2,
+        "gross_notional": notional,
+        "captured_sigma": captured_sigma,
+        "captured_move_price": captured_move,
+        "gross_profit_per_trade": gross_profit,
+        "spread_cost_per_trade": spread_cost,
+        "commission_per_trade": commission,
+        "total_cost_per_trade": total_cost,
+        "net_profit_per_trade": net,
+        "edge_ratio": (gross_profit / total_cost) if total_cost > 0 else None,
+        "breakeven_sigma": breakeven_sigma,
+        "entry_threshold_needed": breakeven_sigma + exit_threshold,
+        "is_tradeable": net > 0,
+        "profit_bps_of_notional": (net / notional * 10_000) if notional else 0.0,
+    }
+
+
+def tradeability_verdict(t: dict[str, Any]) -> tuple[str, str]:
+    """A plain statement of whether the pair clears its own costs."""
+    if not t:
+        return "UNKNOWN", "Not enough information to assess tradeability."
+    ratio = t.get("edge_ratio")
+    if ratio is None:
+        return "UNKNOWN", "Transaction costs are unknown."
+    net = t["net_profit_per_trade"]
+    if ratio >= 3:
+        return "TRADEABLE", (
+            f"A round trip earns about {t['gross_profit_per_trade']:.2f} "
+            f"against {t['total_cost_per_trade']:.2f} of cost — {ratio:.1f}x "
+            f"coverage, leaving {net:.2f} net.")
+    if ratio >= 1.5:
+        return "MARGINAL", (
+            f"A round trip earns about {t['gross_profit_per_trade']:.2f} "
+            f"against {t['total_cost_per_trade']:.2f} of cost — only "
+            f"{ratio:.1f}x coverage. Slippage or a widening quote erases it.")
+    if ratio > 1:
+        return "BARELY VIABLE", (
+            f"Costs consume {100 / ratio:.0f}% of the gross move. "
+            f"Net {net:.2f} per round trip is inside the noise.")
+    return "NOT TRADEABLE", (
+        f"A round trip earns {t['gross_profit_per_trade']:.2f} but costs "
+        f"{t['total_cost_per_trade']:.2f} — every trade loses "
+        f"{abs(net):.2f} on average. The spread would need to reach "
+        f"{t['entry_threshold_needed']:.2f} sigma to break even, against a "
+        f"configured entry of {t['captured_sigma'] + 0:.2f}.")
+
+
+def returns_relationship(leg1: Sequence[float],
+                         leg2: Sequence[float]) -> dict[str, Any]:
+    """Correlation of first differences, distinct from cointegration of levels.
+
+    High correlation with no cointegration means the pair drifts apart while
+    moving together day to day. Cointegration with low correlation means the
+    spread is tethered even though daily moves look unrelated. Only the
+    second is tradeable.
+    """
+    a = np.asarray(leg1, dtype=float)
+    b = np.asarray(leg2, dtype=float)
+    if len(a) < 10 or len(b) < 10:
+        return {}
+    da, db = np.diff(a), np.diff(b)
+    if da.std() == 0 or db.std() == 0:
+        return {}
+    corr = float(np.corrcoef(da, db)[0, 1])
+    slope = float(np.cov(da, db, bias=True)[0, 1] / db.var())
+    intercept = float(da.mean() - slope * db.mean())
+    resid = da - (slope * db + intercept)
+    r_squared = 1 - (resid.var() / da.var()) if da.var() > 0 else 0.0
+    return {
+        "returns_correlation": corr,
+        "returns_beta": slope,
+        "r_squared": float(r_squared),
+        "leg1_diffs": da.tolist(),
+        "leg2_diffs": db.tolist(),
+        "residual_std": float(resid.std()),
+    }

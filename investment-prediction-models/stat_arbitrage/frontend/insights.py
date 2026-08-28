@@ -22,7 +22,7 @@ import requests
 
 Provider = Literal["gemini", "anthropic", "none"]
 
-GEMINI_MODEL = "gemini-3.6-flash"
+GEMINI_MODEL = "gemini-2.5-flash"
 GEMINI_BASE = "https://generativelanguage.googleapis.com/{version}"
 GEMINI_VERSIONS = ("v1beta", "v1")
 # Preference order when falling back to a discovered model.
@@ -133,15 +133,66 @@ def available_providers() -> list[str]:
 # =====================================================================
 
 
+RESEARCH_PROMPT = """\
+You are a quantitative researcher assessing whether a pair of securities is
+suitable for statistical arbitrage.
+
+You will receive a JSON fact pack of ALREADY-COMPUTED figures.
+
+Absolute rules:
+1. Use ONLY numbers present in the fact pack. Never compute, estimate or
+   infer a figure that is not given. If something is missing, say so.
+2. `deterministic_warnings` are checks already verified as true. Treat them
+   as established fact.
+3. The single most important question is whether the spread's typical move is
+   larger than the cost of trading it. A pair can be perfectly cointegrated
+   and completely untradeable. If `tradeability` shows costs exceeding the
+   gross move, that is the finding — lead with it and do not bury it under
+   the statistical results.
+4. Distinguish correlation from cointegration explicitly. Correlation is
+   about co-movement of changes; cointegration is about levels staying
+   tethered. Only the second is what gets traded. Near-perfect correlation is
+   not evidence of a good pair and often indicates the opposite, because it
+   usually comes with a spread too small to cover costs.
+5. Half-life shorter than the bar interval means the spread reverts faster
+   than the data resolves it, so measured z-scores understate the true
+   dynamics.
+
+Write four short sections with these exact headings:
+
+WHAT THE DATA SHOWS
+Two or three sentences on the statistical relationship.
+
+IS IT TRADEABLE
+The economics. Gross move per round trip against cost. Be blunt.
+
+WHAT WOULD HAVE TO CHANGE
+What thresholds, costs or instruments would make this work, if anything.
+
+WHAT TO LOOK FOR IN OTHER PAIRS
+Two or three specific, measurable criteria a better candidate would meet,
+drawn from where this one fails.
+
+Under 350 words. Plain prose, no markdown bullets or bold. Written for
+someone who already understands cointegration.
+"""
+
+
 def generate(facts: dict[str, Any], provider: str | None = None,
-             question: str | None = None) -> tuple[str, str]:
-    """Return (narrative, provider_used)."""
+             question: str | None = None,
+             kind: str = "performance") -> tuple[str, str]:
+    """Return (narrative, provider_used).
+
+    `kind` selects the system prompt: "performance" reviews results,
+    "research" assesses whether a pair is worth trading at all.
+    """
     chosen = resolve_provider(provider)
     prompt = _build_prompt(facts, question)
+    system = RESEARCH_PROMPT if kind == "research" else SYSTEM_PROMPT
 
     if chosen == "gemini":
         try:
-            text = _call_gemini(prompt)
+            text = _call_gemini(prompt, system=system)
             resolved = _resolve_gemini_target.__dict__.get("_cache")
             return text, f"gemini/{resolved[1] if resolved else GEMINI_MODEL}"
         except Exception as e:
@@ -149,7 +200,8 @@ def generate(facts: dict[str, Any], provider: str | None = None,
                                f"{_redact(str(e))}"), "rule-based")
     if chosen == "anthropic":
         try:
-            return _call_anthropic(prompt), f"anthropic/{ANTHROPIC_MODEL}"
+            return (_call_anthropic(prompt, system=system),
+                    f"anthropic/{ANTHROPIC_MODEL}")
         except Exception as e:
             return (rule_based(facts, note=f"Anthropic unavailable: "
                                f"{_redact(str(e))}"), "rule-based")
@@ -256,12 +308,13 @@ def _thinking_configs(model: str) -> list[dict | None]:
 
 
 def _gemini_payload(prompt: str, max_tokens: int,
-                    thinking: dict | None) -> dict:
+                    thinking: dict | None,
+                    system: str = SYSTEM_PROMPT) -> dict:
     cfg: dict = {"temperature": 0.2, "maxOutputTokens": max_tokens}
     if thinking:
         cfg["thinkingConfig"] = thinking
     return {
-        "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+        "systemInstruction": {"parts": [{"text": system}]},
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "generationConfig": cfg,
     }
@@ -304,7 +357,8 @@ def gemini_probe(prompt: str = "Reply with exactly: OK") -> list[dict]:
     return out
 
 
-def _call_gemini(prompt: str, max_tokens: int = GEMINI_MAX_TOKENS) -> str:
+def _call_gemini(prompt: str, max_tokens: int = GEMINI_MAX_TOKENS,
+                 system: str = SYSTEM_PROMPT) -> str:
     key = _key("GEMINI_API_KEY")
     if not key:
         raise RuntimeError("GEMINI_API_KEY not configured")
@@ -317,7 +371,8 @@ def _call_gemini(prompt: str, max_tokens: int = GEMINI_MAX_TOKENS) -> str:
         for budget in (max_tokens, max_tokens * 4):
             resp = requests.post(
                 url, headers=headers,
-                json=_gemini_payload(prompt, budget, thinking), timeout=TIMEOUT)
+                json=_gemini_payload(prompt, budget, thinking, system),
+                timeout=TIMEOUT)
 
             if resp.status_code == 400:
                 last_error = f"400 with {thinking}: {_redact(resp.text)[:160]}"
@@ -355,7 +410,7 @@ def _call_gemini(prompt: str, max_tokens: int = GEMINI_MAX_TOKENS) -> str:
                        f"Run scripts/check_llm.py for a full breakdown.")
 
 
-def _call_anthropic(prompt: str) -> str:
+def _call_anthropic(prompt: str, system: str = SYSTEM_PROMPT) -> str:
     key = _key("ANTHROPIC_API_KEY")
     if not key:
         raise RuntimeError("ANTHROPIC_API_KEY not configured")
@@ -365,7 +420,7 @@ def _call_anthropic(prompt: str) -> str:
                  "content-type": "application/json"},
         json={
             "model": ANTHROPIC_MODEL, "max_tokens": ANTHROPIC_MAX_TOKENS, "temperature": 0.2,
-            "system": SYSTEM_PROMPT,
+            "system": system,
             "messages": [{"role": "user", "content": prompt}],
         },
         timeout=TIMEOUT)
