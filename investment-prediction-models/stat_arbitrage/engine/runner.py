@@ -66,6 +66,7 @@ class Engine:
                  trade_outside_rth: bool = False,
                  warmup_lookback: str = "auto",
                  broker: str = "paper",
+                 max_data_age_seconds: float = 0.0,
                  flatten_before_close_minutes: int = 0,
                  limit_orders: bool = False) -> None:
         self.store = Store()
@@ -86,6 +87,10 @@ class Engine:
         self.trade_outside_rth = trade_outside_rth
 
         self.broker_kind = broker
+        #: Refuse new entries when the newest bar is older than this. A signal
+        #: computed from stale prices describes a dislocation that has already
+        #: closed. 0 disables the guard.
+        self.max_data_age_seconds = max_data_age_seconds
         self.flatten_before_close_minutes = flatten_before_close_minutes
         if broker == "ibkr":
             from engine.broker import IBKRBroker
@@ -713,10 +718,35 @@ class Engine:
         if decision.action in (Action.ENTER_LONG, Action.ENTER_SHORT):
             if self._near_close():
                 return "NO_SIGNAL"      # too close to the bell to open
+
+            age = (datetime.now(timezone.utc) - bar.ts).total_seconds()
+            if self.max_data_age_seconds and age > self.max_data_age_seconds:
+                self.store.write_signal(
+                    self.pair_id, bar.ts,
+                    "LONG_SPREAD" if decision.action == Action.ENTER_LONG
+                    else "SHORT_SPREAD", previous, snapshot, decision.reason,
+                    False, self.config["version"],
+                    f"data {age / 60:.1f} min old, above the "
+                    f"{self.max_data_age_seconds / 60:.1f} min limit")
+                self.store.log(
+                    "WARNING", "RISK",
+                    f"Entry suppressed: the bar is {age / 60:.1f} min old and "
+                    f"the spread half-life is "
+                    f"{(snapshot.half_life or 0):.1f} bars, so this signal "
+                    f"describes a dislocation that has already closed.",
+                    self.pair_id)
+                return "NO_SIGNAL"
             direction = ("LONG_SPREAD" if decision.action == Action.ENTER_LONG
                          else "SHORT_SPREAD")
+            data_age = (datetime.now(timezone.utc) - bar.ts).total_seconds()
             opened = self.broker.enter(direction, bar, snapshot,
                                        self.last_quotes)
+            if opened:
+                self.store.log(
+                    "INFO", "ORDER",
+                    f"Entered on data {data_age / 60:.1f} min old "
+                    f"(z={snapshot.zscore:+.3f} as of "
+                    f"{bar.ts:%H:%M:%S} UTC)", self.pair_id)
             self.current_signal = direction if opened else "NO_SIGNAL"
             self.signal_since = datetime.now(timezone.utc)
             self.store.write_signal(

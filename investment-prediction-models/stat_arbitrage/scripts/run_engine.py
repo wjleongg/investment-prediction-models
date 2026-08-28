@@ -40,6 +40,13 @@ def main() -> None:
                          "ibkr: real orders sent to the connected TWS "
                          "account. Which account that is — paper or live — "
                          "depends entirely on which TWS session is logged in.")
+    ap.add_argument("--max-data-age", type=float, default=0.0, metavar="MIN",
+                    help="Refuse new entries when the newest bar is older "
+                         "than this many minutes. Without a market data "
+                         "subscription IBKR bars run ~16 min late, which is "
+                         "many half-lives for this strategy. 0 disables the "
+                         "guard (default), which is appropriate only when "
+                         "validating the pipeline rather than the edge.")
     ap.add_argument("--limit-orders", action="store_true",
                     help="Use marketable limit orders instead of market "
                          "orders when routing to IBKR.")
@@ -76,6 +83,7 @@ def main() -> None:
         try:
             restart = run(
                 pair_id=args.pair_id, feed=args.feed, broker=args.broker,
+                max_data_age_seconds=args.max_data_age * 60,
                 limit_orders=args.limit_orders,
                 flatten_before_close_minutes=args.flatten_before_close,
                 slippage_bps=args.slippage_bps,
