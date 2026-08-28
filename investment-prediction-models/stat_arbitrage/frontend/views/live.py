@@ -97,7 +97,7 @@ def overview(header: HeaderState) -> None:
             stale, age = _staleness(live, interval)
             if stale:
                 shown = "unknown" if age is None else f"{age / 60:.1f} min"
-                c.banner(f"⚠ No market data for {shown} on a "
+                c.banner(f"No market data for {shown} on a "
                          f"{interval or 'unknown'} feed.", "warn")
         else:
             c.empty_state("live pair state", "Engine has not written live_state.")
@@ -169,7 +169,7 @@ def overview(header: HeaderState) -> None:
                    else "v-neu"),
         ])
         for breach in analytics.limit_breaches(exposure):
-            c.banner(f"⚠ {breach}", "bad")
+            c.banner(f"{breach}", "bad")
         if exposure["is_flat"]:
             st.caption("Currently flat. Limits shown are the headroom "
                        "available to the next position.")

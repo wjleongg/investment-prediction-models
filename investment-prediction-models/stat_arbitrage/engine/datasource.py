@@ -363,8 +363,11 @@ class IBKRPollingSource(IBKRSource):
 
     @property
     def latency_note(self) -> str:
-        return (f"bar-latency feed ({self.bar_size} bars polled every "
-                f"{self.poll_seconds:g}s); no bid/ask available")
+        lag = self.last_bar_lag_seconds
+        measured = (f", last bar {lag / 60:.0f} min behind"
+                    if lag is not None else "")
+        return (f"bar feed ({self.bar_size} polled every "
+                f"{self.poll_seconds:g}s){measured}; no bid/ask")
 
     def warmup(self, ticker1: str, ticker2: str,
                lookback: str = "2 D") -> list[PairQuote]:
@@ -411,6 +414,17 @@ class IBKRPollingSource(IBKRSource):
                 # faster than the bar interval does not duplicate rows.
                 if self._last_emitted is None or pq.ts > self._last_emitted:
                     self._last_emitted = pq.ts
+                    # Report how far behind the bar is. Without a market data
+                    # subscription IBKR delays historical bars too, and that
+                    # lag decides whether a signal is actionable or archaeology.
+                    lag = (datetime.now(timezone.utc) - pq.ts).total_seconds()
+                    if lag > 300 and self._lag_warned is False:
+                        self._report("WARNING",
+                                     f"Bars arrive {lag / 60:.0f} min behind "
+                                     f"real time. Signals reference a market "
+                                     f"that has already moved.")
+                        self._lag_warned = True
+                    self.last_bar_lag_seconds = lag
                     yield pq
 
             self._ib.sleep(self.poll_seconds + backoff)

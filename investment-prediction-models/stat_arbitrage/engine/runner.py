@@ -93,6 +93,11 @@ class Engine:
                 self.store, self.pair, self.strategy_params, self.source,
                 use_limit_orders=limit_orders,
                 commission_per_share=commission_per_share)
+            self.store.log(
+                "INFO", "SYSTEM",
+                f"Order routing: {'marketable limit' if limit_orders else 'market'}"
+                f" orders, TIF={self.broker.tif}, outsideRth="
+                f"{self.broker.outside_rth}", self.pair_id)
         else:
             self.broker = PaperBroker(
                 self.store, self.pair, self.strategy_params,
@@ -108,6 +113,7 @@ class Engine:
         self.last_quotes: dict[str, float | None] = {}
         self.restart_requested = False
 
+        self._first_bar_seen = False
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
         self._last_events: dict[str, Any] = {}
@@ -598,6 +604,15 @@ class Engine:
 
     def _on_bar(self, quote: PairQuote) -> None:
         now = datetime.now(timezone.utc)
+        if not self._first_bar_seen:
+            self._first_bar_seen = True
+            lag = (now - quote.ts).total_seconds()
+            self.store.log(
+                "INFO" if lag < 300 else "WARNING", "MARKET_DATA",
+                f"First bar received: stamped {quote.ts:%H:%M:%S} UTC, "
+                f"{lag / 60:.1f} min behind now. "
+                f"{quote.leg1.ticker}={quote.leg1.price:.4f} "
+                f"{quote.leg2.ticker}={quote.leg2.price:.4f}", self.pair_id)
         self._last_events["last_market_data_at"] = now
         self.broker.roll_session(self.last_bar)
 
@@ -647,6 +662,17 @@ class Engine:
 
     def _evaluate(self, bar: Bar, snapshot: ModelSnapshot) -> str:
         """Decide and act. Returns the signal label for persistence."""
+        # A halted broker means the account is in an unknown state. Retrying
+        # can only compound it, so stop rather than trade on.
+        if getattr(self.broker, "halted", False) and self.state == "RUNNING":
+            self.state = "PAUSED"
+            self.store.log(
+                "CRITICAL", "RISK",
+                f"Engine PAUSED: {self.broker.halt_reason}. Close the "
+                f"position manually in TWS, then Resume from Controls.",
+                self.pair_id)
+            return "NO_SIGNAL"
+
         if self.state != "RUNNING":
             return "NO_SIGNAL"
 
