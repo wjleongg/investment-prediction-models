@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pandas as pd
 import streamlit as st
 
@@ -10,6 +12,24 @@ import components as c
 import data
 from contract.models import HeaderState
 from engine import analytics
+
+
+# Seconds without a bar before a feed counts as stale, by bar interval.
+_STALE_AFTER = {"1s": 15, "2s": 15, "5s": 20, "10s": 40, "30s": 120,
+                "1m": 180, "2m": 360, "5m": 900, "1d": 259200}
+
+
+def _staleness(live, interval: str | None) -> tuple[bool, float | None]:
+    """Whether market data has gone quiet, and for how long.
+
+    Computed here rather than on the model so a frontend deployed against an
+    older contract/models.py degrades instead of crashing.
+    """
+    last = getattr(live, "last_market_data_at", None)
+    if last is None:
+        return True, None
+    age = (datetime.now(timezone.utc) - last).total_seconds()
+    return age > _STALE_AFTER.get(interval or "", 180), age
 
 
 # =====================================================================
@@ -74,16 +94,11 @@ def overview(header: HeaderState) -> None:
                 c.pill(m.health.label, c.HEALTH_TONE.get(m.health, "mute")),
                 unsafe_allow_html=True)
             interval = data.active_interval(pair.id)
-            try:
-                stale = live.market_data_is_stale(bar_interval=interval)
-            except TypeError:
-                # Older contract/models.py without the bar_interval argument.
-                stale = live.market_data_is_stale()
+            stale, age = _staleness(live, interval)
             if stale:
-                age = live.market_data_age()
-                c.banner(f"⚠ No market data for "
-                         f"{'unknown' if age is None else f'{age / 60:.1f} min'} "
-                         f"on a {interval or 'unknown'} feed.", "warn")
+                shown = "unknown" if age is None else f"{age / 60:.1f} min"
+                c.banner(f"⚠ No market data for {shown} on a "
+                         f"{interval or 'unknown'} feed.", "warn")
         else:
             c.empty_state("live pair state", "Engine has not written live_state.")
 

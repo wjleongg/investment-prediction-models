@@ -1065,3 +1065,4 @@ class SystemHealthState:
     components: Sequence[ComponentStatus] = ()
     metrics: SystemMetrics | None = None
     logs: Sequence[LogEntry] = ()
+    
