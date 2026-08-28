@@ -159,11 +159,63 @@ def check(path: Path) -> list[str]:
     return problems
 
 
+def undefined_calls(path: Path) -> list[str]:
+    """Module-level functions called but never defined in this file.
+
+    Catches the other half of the edit-by-replacement failure mode: a helper
+    removed while rewriting the span around it, leaving live call sites that
+    raise NameError only when that path executes.
+    """
+    tree = ast.parse(path.read_text())
+    defined = {n.name for n in tree.body
+               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                 ast.ClassDef))}
+    for node in tree.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                defined.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, ast.Assign):
+            defined.update(t.id for t in node.targets
+                           if isinstance(t, ast.Name))
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            defined.add(node.target.id)
+
+    # Names bound anywhere as locals, comprehension vars, args, or nested
+    # function definitions. A helper defined inside another function is
+    # perfectly valid and must not be reported.
+    local = set(dir(__builtins__)) | set(vars(__builtins__))
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            local.add(node.name)
+            local.update(a.arg for a in node.args.args)
+            local.update(a.arg for a in node.args.kwonlyargs)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            local.add(node.id)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                local.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            local.add(node.name)
+
+    problems = []
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id.startswith("_")
+                and node.func.id not in defined
+                and node.func.id not in local):
+            problems.append(
+                f"{path.relative_to(ROOT)}:{node.lineno}  {node.func.id}() is "
+                f"called but never defined")
+    return problems
+
+
 def main() -> None:
     targets = sorted((ROOT / "engine").glob("*.py"))
+    targets += sorted((ROOT / "frontend").glob("*.py"))
+    targets += sorted((ROOT / "frontend" / "views").glob("*.py"))
     all_problems: list[str] = []
     for path in targets:
-        found = check(path)
+        found = check(path) + undefined_calls(path)
         status = "FAIL" if found else "ok"
         print(f"  {status:<5} {path.relative_to(ROOT)}")
         all_problems.extend(found)

@@ -22,12 +22,15 @@ import requests
 
 Provider = Literal["gemini", "anthropic", "none"]
 
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = "gemini-3.6-flash"
 GEMINI_BASE = "https://generativelanguage.googleapis.com/{version}"
 GEMINI_VERSIONS = ("v1beta", "v1")
-# Preference order when falling back to a discovered model.
-GEMINI_FALLBACKS = ("gemini-2.5-flash", "gemini-2.0-flash",
-                    "gemini-flash-latest", "gemini-2.5-pro")
+# Preference order when falling back to a discovered model. Newest first:
+# older models remain listed by the API long after they stop accepting new
+# users, so a listing is not evidence that a model is callable.
+GEMINI_FALLBACKS = ("gemini-3.7-flash", "gemini-3.6-flash",
+                    "gemini-3.5-flash", "gemini-3-flash",
+                    "gemini-flash-latest", "gemini-2.5-flash")
 
 ANTHROPIC_MODEL = "claude-sonnet-5"
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
@@ -197,15 +200,15 @@ def generate(facts: dict[str, Any], provider: str | None = None,
             return text, f"gemini/{resolved[1] if resolved else GEMINI_MODEL}"
         except Exception as e:
             return (rule_based(facts, note=f"Gemini unavailable: "
-                               f"{_redact(str(e))}"), "rule-based")
+                               f"{_redact(str(e))}", kind=kind), "rule-based")
     if chosen == "anthropic":
         try:
             return (_call_anthropic(prompt, system=system),
                     f"anthropic/{ANTHROPIC_MODEL}")
         except Exception as e:
             return (rule_based(facts, note=f"Anthropic unavailable: "
-                               f"{_redact(str(e))}"), "rule-based")
-    return rule_based(facts), "rule-based"
+                               f"{_redact(str(e))}", kind=kind), "rule-based")
+    return rule_based(facts, kind=kind), "rule-based"
 
 
 def _trim(facts: dict[str, Any]) -> dict[str, Any]:
@@ -260,38 +263,58 @@ def list_gemini_models(key: str | None = None) -> list[dict]:
 def _resolve_gemini_target(key: str) -> tuple[str, str]:
     """Find a (version, model) pair this key can actually call.
 
-    Model availability varies by key type, project and region, so the
-    configured default is tried first and discovery is the fallback.
+    ListModels is not sufficient: a model can be listed and still refuse
+    generateContent with 404 "no longer available to new users". Every
+    candidate is therefore verified with a real call before being cached.
     """
     cached = _resolve_gemini_target.__dict__.get("_cache")
     if cached:
         return cached
 
-    for version in GEMINI_VERSIONS:
+    tried: list[str] = []
+
+    def callable_on(version: str, model: str) -> bool:
         url = (f"{GEMINI_BASE.format(version=version)}/models/"
-               f"{GEMINI_MODEL}:generateContent")
-        r = requests.post(url, headers={"x-goog-api-key": key},
-                          json={"contents": [{"parts": [{"text": "ping"}]}]},
-                          timeout=TIMEOUT)
-        if r.status_code == 200:
-            _resolve_gemini_target._cache = (version, GEMINI_MODEL)
-            return _resolve_gemini_target._cache
+               f"{model}:generateContent")
+        try:
+            r = requests.post(
+                url, headers={"x-goog-api-key": key},
+                json={"contents": [{"parts": [{"text": "ping"}]}],
+                      "generationConfig": {"maxOutputTokens": 8}},
+                timeout=TIMEOUT)
+        except requests.RequestException:
+            return False
         if r.status_code in (401, 403):
             raise RuntimeError("API key rejected (check the key is enabled "
                                "for the Generative Language API)")
+        tried.append(f"{model}@{version}={r.status_code}")
+        return r.status_code == 200
 
+    # Configured model first.
+    for version in GEMINI_VERSIONS:
+        if callable_on(version, GEMINI_MODEL):
+            _resolve_gemini_target._cache = (version, GEMINI_MODEL)
+            return _resolve_gemini_target._cache
+
+    # Then discovery, verifying each candidate rather than trusting the list.
     available = list_gemini_models(key)
     if not available:
         raise RuntimeError("no models available to this key — enable the "
                            "Generative Language API in your Google project")
+
+    ordered = []
     for preferred in GEMINI_FALLBACKS:
-        for m in available:
-            if m["name"].startswith(preferred):
-                _resolve_gemini_target._cache = (m["version"], m["name"])
-                return _resolve_gemini_target._cache
-    m = available[0]
-    _resolve_gemini_target._cache = (m["version"], m["name"])
-    return _resolve_gemini_target._cache
+        ordered += [m for m in available if m["name"].startswith(preferred)]
+    ordered += [m for m in available if m not in ordered]
+
+    for m in ordered[:8]:
+        if callable_on(m["version"], m["name"]):
+            _resolve_gemini_target._cache = (m["version"], m["name"])
+            return _resolve_gemini_target._cache
+
+    raise RuntimeError(
+        f"no listed model accepted a request. Tried: {', '.join(tried[:8])}. "
+        f"Models can be listed but closed to new users.")
 
 
 def _thinking_configs(model: str) -> list[dict | None]:
@@ -299,10 +322,10 @@ def _thinking_configs(model: str) -> list[dict | None]:
 
     Gemini 3.x uses thinkingLevel; 2.5 uses thinkingBudget. Both bill their
     reasoning against maxOutputTokens, which truncates the visible answer if
-    left unbounded. The parameter names differ and unsupported ones are
-    sometimes ignored rather than rejected, so we try each and verify.
+    left unbounded. Unsupported parameters are sometimes ignored rather than
+    rejected, so each is tried and the result verified.
     """
-    if "gemini-3" in model or "3." in model:
+    if "gemini-3" in model:
         return [{"thinkingLevel": "low"}, {"thinkingBudget": 0}, None]
     return [{"thinkingBudget": 0}, {"thinkingLevel": "low"}, None]
 
@@ -438,13 +461,17 @@ def _call_anthropic(prompt: str, system: str = SYSTEM_PROMPT) -> str:
 # =====================================================================
 
 
-def rule_based(facts: dict[str, Any], note: str | None = None) -> str:
+def rule_based(facts: dict[str, Any], note: str | None = None,
+               kind: str = "performance") -> str:
     """Template summary from the fact pack. Always available, never wrong."""
     perf = facts.get("performance", {})
     attr = facts.get("attribution", {})
     risk = facts.get("risk", {})
     cost = facts.get("transaction_cost_sensitivity", [])
     warnings = facts.get("deterministic_warnings", [])
+
+    if kind == "research":
+        return _rule_based_research(facts, note)
 
     lines = ["WHAT HAPPENED"]
     if perf:
@@ -502,4 +529,55 @@ def rule_based(facts: dict[str, Any], note: str | None = None) -> str:
             f"with 95% VaR of {risk.get('var_95_pct', 0):.3f}% — confirm "
             f"whether returns are large enough to be distinguishable from "
             f"noise.")
+    return "\n".join(lines)
+
+
+def _rule_based_research(facts: dict[str, Any], note: str | None) -> str:
+    """Deterministic pair assessment when no model is reachable."""
+    spread = facts.get("spread", {})
+    trade = facts.get("tradeability", {})
+    tests = facts.get("statistical_tests", [])
+    stability = facts.get("stability", {})
+    warnings = facts.get("deterministic_warnings", [])
+
+    lines = ["WHAT THE DATA SHOWS"]
+    passed = [t["test"] for t in tests if t.get("passed")]
+    if tests:
+        lines.append(
+            f"{len(passed)} of {len(tests)} tests support cointegration "
+            f"({', '.join(passed) if passed else 'none'}). Spread mean "
+            f"{spread.get('mean', 0):.4f}, standard deviation "
+            f"{spread.get('std', 0):.4f} over "
+            f"{spread.get('observations', 0):,} observations.")
+    if stability.get("windows_cointegrated_pct") is not None:
+        lines.append(
+            f"  {stability['windows_cointegrated_pct']:.0f}% of rolling "
+            f"windows hold cointegration at the configured threshold.")
+
+    lines.append("\nIS IT TRADEABLE")
+    if trade:
+        lines.append(
+            f"  A round trip captures {trade.get('captured_sigma', 0):.1f} "
+            f"sigma, worth {trade.get('gross_profit_per_trade', 0):.2f}, "
+            f"against {trade.get('total_cost_per_trade', 0):.2f} of cost. "
+            f"Net {trade.get('net_profit_per_trade', 0):+.2f} per trade.")
+        if not trade.get("is_tradeable", False):
+            lines.append(
+                f"  Entry would need to reach "
+                f"{trade.get('entry_threshold_needed', 0):.2f} sigma to break "
+                f"even.")
+    else:
+        lines.append("  Tradeability has not been computed — enter the quoted "
+                     "spreads in the Tradeability section above.")
+
+    lines.append("\nCONCERNS")
+    lines.extend(f"  {w}" for w in warnings) if warnings else lines.append(
+        "  No deterministic warnings were triggered.")
+
+    lines.append("\nWHAT TO LOOK FOR IN OTHER PAIRS")
+    lines.append("  A spread whose standard deviation is large relative to the "
+                 "quoted spread of both legs — that ratio, not correlation, "
+                 "determines whether a pair can be traded profitably.")
+    if note:
+        lines.append(f"\n  Narrative model was not reached — {note}")
     return "\n".join(lines)
