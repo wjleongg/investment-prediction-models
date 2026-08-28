@@ -192,11 +192,21 @@ def decide(bar: Bar, position: OpenPosition | None,
                         f"relationship no longer valid: {why}",
                         ExitCause.RELATIONSHIP_INVALID)
 
-    if abs(z) <= p.exit_threshold:
+    # Directional, not |z| <= exit. A long spread entered at -2.4 is closed
+    # once the z-score has risen TO OR PAST the exit band — including an
+    # overshoot to +1.5. Testing abs(z) would leave that position open
+    # because it is outside the band on the far side, which on fast bars
+    # means a profitable trade is held until the stop or the holding limit.
+    reverted = (z >= -p.exit_threshold if position.direction == "LONG_SPREAD"
+                else z <= p.exit_threshold)
+    if reverted:
+        overshoot = ((z > p.exit_threshold) if position.direction == "LONG_SPREAD"
+                     else (z < -p.exit_threshold))
+        detail = (" (overshot through the band)" if overshoot else "")
         return Decision(
             Action.EXIT,
-            f"z-score {z:.2f} reverted inside the ±{p.exit_threshold:g} exit "
-            f"threshold", ExitCause.MEAN_REVERSION)
+            f"z-score {z:.2f} reverted to the ±{p.exit_threshold:g} exit "
+            f"threshold{detail}", ExitCause.MEAN_REVERSION)
 
     return Decision(Action.HOLD,
                     f"z-score {z:.2f} still outside the exit threshold")

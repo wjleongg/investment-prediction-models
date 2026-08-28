@@ -24,6 +24,15 @@ from engine.strategy import OpenPosition, StrategyParams, pnl_for, size_position
 
 
 @dataclass(frozen=True, slots=True)
+class _EntryBar:
+    """Minimal stand-in for the bar an adopted position was opened on."""
+
+    ts: datetime
+    leg1_price: float
+    leg2_price: float
+
+
+@dataclass(frozen=True, slots=True)
 class Fill:
     ticker: str
     side: Literal["BUY", "SELL"]
@@ -53,8 +62,13 @@ class PaperBroker:
         self.position: OpenPosition | None = None
         self.trade_id: int | None = None
         self.realized_pnl = 0.0
-        self.daily_pnl = 0.0
         self._session_date = datetime.now(timezone.utc).date()
+        # Equity at the session open, so daily P&L includes the change in
+        # unrealised value rather than only what was closed today. A position
+        # held across days would otherwise show zero daily P&L while moving.
+        self._session_open_equity = 0.0
+        self._entry_fills: tuple = ()
+        self._entry_commission = 0.0
 
     # --- helpers ------------------------------------------------------
 
@@ -136,16 +150,54 @@ class PaperBroker:
         f1 = self._execute(self.leg1, side1, q1, bar.leg1_price,
                            quotes.get("leg1_bid"), quotes.get("leg1_ask"),
                            trade_id)
-        f2 = self._execute(self.leg2, side2, q2, bar.leg2_price,
-                           quotes.get("leg2_bid"), quotes.get("leg2_ask"),
-                           trade_id)
+        try:
+            f2 = self._execute(self.leg2, side2, q2, bar.leg2_price,
+                               quotes.get("leg2_bid"), quotes.get("leg2_ask"),
+                               trade_id)
+        except Exception:
+            # Leg 1 filled and leg 2 did not. Holding one leg is naked
+            # directional exposure, not a spread, so it must be undone before
+            # anything else happens.
+            self.store.log("ERROR", "RISK",
+                           f"Second leg failed after {self.leg1} filled; "
+                           f"reversing the first leg", self.pair_id)
+            reverse = "SELL" if side1 == "BUY" else "BUY"
+            try:
+                self._execute(self.leg1, reverse, q1, bar.leg1_price,
+                              quotes.get("leg1_bid"), quotes.get("leg1_ask"),
+                              trade_id)
+            except Exception as unwind_error:
+                self.store.log(
+                    "CRITICAL", "RISK",
+                    f"COULD NOT REVERSE {self.leg1}: {unwind_error}. The "
+                    f"account holds unhedged exposure and needs manual "
+                    f"intervention.", self.pair_id)
+            if trade_id is not None:
+                self.store.close_trade(trade_id, {
+                    "status": "FAILED",
+                    "exit_time": datetime.now(timezone.utc).isoformat(),
+                    "exit_reason": "MANUAL", "net_pnl": 0, "gross_pnl": 0})
+            self.trade_id = None
+            raise
 
         self.position = OpenPosition(
             direction=direction, entry_ts=ts, entry_bar=bar,
-            leg1_quantity=q1, leg2_quantity=q2,
+            leg1_quantity=f1.quantity or q1, leg2_quantity=f2.quantity or q2,
             hedge_ratio=snapshot.hedge_ratio or 1.0)
         self._entry_fills = (f1, f2)
         self._entry_commission = f1.commission + f2.commission
+
+        # Overwrite the entry prices with what actually filled, and record
+        # entry commission. Without this the stored trade shows mid prices,
+        # so P&L is wrong and a restart cannot recover the real cost basis.
+        if trade_id is not None:
+            self.store.update_trade(trade_id, {
+                "leg1_entry_price": round(f1.price, 6),
+                "leg2_entry_price": round(f2.price, 6),
+                "leg1_quantity": f1.quantity or q1,
+                "leg2_quantity": f2.quantity or q2,
+                "fees": round(self._entry_commission, 4),
+            })
 
         self._write_positions(bar)
         self.store.log("INFO", "ORDER",
@@ -203,7 +255,6 @@ class PaperBroker:
             })
 
         self.realized_pnl += net
-        self.daily_pnl += net
         self.position = None
         self.trade_id = None
         self.store.clear_positions(self.pair_id)
@@ -216,6 +267,47 @@ class PaperBroker:
         return net
 
     # --- marking ------------------------------------------------------
+
+    def adopt(self, trade_row: dict) -> bool:
+        """Resume managing a position opened by an earlier engine session.
+
+        The stored entry prices are actual fill prices, so the recovered cost
+        basis and P&L match what the previous session had.
+        """
+        if self.position is not None:
+            return False
+
+        entry_ts = datetime.fromisoformat(
+            str(trade_row["entry_time"]).replace("Z", "+00:00"))
+        if entry_ts.tzinfo is None:
+            entry_ts = entry_ts.replace(tzinfo=timezone.utc)
+
+        p1 = float(trade_row["leg1_entry_price"])
+        p2 = float(trade_row["leg2_entry_price"])
+        q1 = float(trade_row["leg1_quantity"])
+        q2 = float(trade_row["leg2_quantity"])
+        beta = float(trade_row.get("entry_hedge_ratio") or 1.0)
+
+        entry_bar = _EntryBar(ts=entry_ts, leg1_price=p1, leg2_price=p2)
+        self.position = OpenPosition(
+            direction=trade_row["direction"], entry_ts=entry_ts,
+            entry_bar=entry_bar, leg1_quantity=q1, leg2_quantity=q2,
+            hedge_ratio=beta)
+        self._entry_fills = (
+            Fill(self.leg1, "BUY", q1, p1, entry_ts),
+            Fill(self.leg2, "SELL", q2, p2, entry_ts))
+        self._entry_commission = float(trade_row.get("fees") or 0.0)
+        self.trade_id = trade_row["id"]
+
+        held_days = (datetime.now(timezone.utc) - entry_ts).days
+        self.store.log(
+            "INFO", "SYSTEM",
+            f"Adopted open trade #{self.trade_id}: {trade_row['direction']} "
+            f"opened {entry_ts:%Y-%m-%d %H:%M} UTC ({held_days}d ago) at "
+            f"{p1:.4f}/{p2:.4f}, entry z="
+            f"{trade_row.get('entry_zscore')}. Exit logic now applies to it.",
+            self.pair_id)
+        return True
 
     def unrealized(self, bar) -> float:
         if self.position is None:
@@ -254,12 +346,22 @@ class PaperBroker:
     def mark_to_market(self, bar) -> None:
         self._write_positions(bar)
 
-    def roll_session(self) -> None:
-        """Reset daily P&L at the start of a new UTC day."""
+    def daily_pnl_at(self, bar) -> float:
+        """Realised plus unrealised change since the session opened."""
+        equity = self.realized_pnl + self.unrealized(bar)
+        return equity - self._session_open_equity
+
+    def roll_session(self, bar=None) -> None:
+        """Rebase daily P&L at the start of a new UTC day.
+
+        The baseline is total equity, not zero, so a position carried
+        overnight contributes only the movement that happened today.
+        """
         today = datetime.now(timezone.utc).date()
         if today != self._session_date:
             self._session_date = today
-            self.daily_pnl = 0.0
+            self._session_open_equity = (
+                self.realized_pnl + (self.unrealized(bar) if bar else 0.0))
 
     def exposure(self, bar) -> tuple[float, float]:
         """(gross, net) exposure at current prices."""

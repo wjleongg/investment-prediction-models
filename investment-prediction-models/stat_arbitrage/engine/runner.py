@@ -21,6 +21,7 @@ frontend treats a heartbeat older than 5s as stale.
 
 from __future__ import annotations
 
+import math
 import os
 import signal as os_signal
 import threading
@@ -63,7 +64,10 @@ class Engine:
     def __init__(self, pair_id: int = 1, feed: str = "poll",
                  slippage_bps: float = 0.0, commission_per_share: float = 0.0,
                  trade_outside_rth: bool = False,
-                 warmup_lookback: str = "auto") -> None:
+                 warmup_lookback: str = "auto",
+                 broker: str = "paper",
+                 flatten_before_close_minutes: int = 0,
+                 limit_orders: bool = False) -> None:
         self.store = Store()
         self.pair = self.store.load_pair(pair_id)
         self.pair_id = pair_id
@@ -81,10 +85,19 @@ class Engine:
         self.warmup_lookback = warmup_lookback
         self.trade_outside_rth = trade_outside_rth
 
-        self.broker = PaperBroker(
-            self.store, self.pair, self.strategy_params,
-            slippage_bps=slippage_bps,
-            commission_per_share=commission_per_share)
+        self.broker_kind = broker
+        self.flatten_before_close_minutes = flatten_before_close_minutes
+        if broker == "ibkr":
+            from engine.broker import IBKRBroker
+            self.broker = IBKRBroker(
+                self.store, self.pair, self.strategy_params, self.source,
+                use_limit_orders=limit_orders,
+                commission_per_share=commission_per_share)
+        else:
+            self.broker = PaperBroker(
+                self.store, self.pair, self.strategy_params,
+                slippage_bps=slippage_bps,
+                commission_per_share=commission_per_share)
 
         self.state = "STARTING"
         self.started_at = datetime.now(timezone.utc)
@@ -124,10 +137,15 @@ class Engine:
                        f"Engine starting for {self.leg1}/{self.leg2}, "
                        f"feed={self.feed_kind}, config v{self.config['version']}",
                        self.pair_id)
+        if self.broker_kind == "ibkr" and self.feed_kind == "sim":
+            raise RuntimeError(
+                "Cannot route real orders on a simulated feed: fills would be "
+                "priced against prices that do not exist.")
         self._connect()
         self._start_background()
         try:
             self._warmup()
+            self._reconcile()
             self._run_loop()
         except KeyboardInterrupt:
             self.store.log("INFO", "SYSTEM", "Interrupted by operator",
@@ -162,6 +180,71 @@ class Engine:
             self.store.connection("BROKER", "ERROR", str(e)[:200])
             self.store.connection("MARKET_DATA", "ERROR", str(e)[:200])
             raise
+
+    def _reconcile(self) -> None:
+        """Recover any position still running from a previous session.
+
+        A pair position is a live strategy, not a leftover. If the engine
+        stopped while the spread had not yet converged, the correct action on
+        restart is to resume managing that position — applying the same exit,
+        stop-loss and holding-period rules — not to abandon or blindly close
+        it.
+
+        Four cases:
+          both agree flat          -> nothing to do
+          open trade + broker holds -> adopt and continue managing
+          open trade, broker flat   -> closed outside the engine; reconcile
+          broker holds, no trade    -> genuinely unknown; pause for a human
+        """
+        trade_row = self.store.open_trade_row(self.pair_id)
+        broker_held = (self.broker.broker_positions()
+                       if hasattr(self.broker, "broker_positions") else {})
+        has_broker_position = any(v != 0 for v in broker_held.values())
+
+        if trade_row is None and not has_broker_position:
+            self.store.log("INFO", "SYSTEM",
+                           "Startup reconciliation: flat, nothing to recover.",
+                           self.pair_id)
+            self.store.clear_positions(self.pair_id)
+            return
+
+        if trade_row is not None and (has_broker_position
+                                      or self.broker_kind == "paper"):
+            self.broker.adopt(trade_row)
+            self._restore_signal_state(trade_row)
+            return
+
+        if trade_row is not None and not has_broker_position:
+            self.store.log(
+                "WARNING", "RISK",
+                f"Trade #{trade_row['id']} is OPEN in the database but the "
+                f"broker reports no position. It was closed outside this "
+                f"engine. Marking it closed with zero P&L so the record is "
+                f"consistent.", self.pair_id)
+            self.store.close_trade(trade_row["id"], {
+                "status": "CLOSED",
+                "exit_time": datetime.now(timezone.utc).isoformat(),
+                "exit_reason": "MANUAL", "gross_pnl": 0, "net_pnl": 0,
+            })
+            self.store.clear_positions(self.pair_id)
+            return
+
+        # Broker holds something with no matching trade record.
+        self.state = "PAUSED"
+        self.store.log(
+            "CRITICAL", "RISK",
+            f"Broker holds {broker_held} but there is no open trade record. "
+            f"The engine cannot compute a cost basis for this and has PAUSED. "
+            f"Flatten it or resume deliberately from the Controls page.",
+            self.pair_id)
+
+    def _restore_signal_state(self, trade_row: dict) -> None:
+        """Reflect an adopted position in the signal shown on the dashboard."""
+        self.current_signal = trade_row["direction"]
+        entry_ts = datetime.fromisoformat(
+            str(trade_row["entry_time"]).replace("Z", "+00:00"))
+        self.signal_since = (entry_ts if entry_ts.tzinfo
+                             else entry_ts.replace(tzinfo=timezone.utc))
 
     def _start_background(self) -> None:
         for target, name in ((self._heartbeat_loop, "heartbeat"),
@@ -277,11 +360,20 @@ class Engine:
             return {"restarting": True}
 
         if name == "CANCEL_ALL_ORDERS":
-            # Paper fills are immediate, so nothing can be resting.
-            return {"cancelled": 0, "note": "paper fills are immediate"}
+            if self.broker_kind == "ibkr":
+                cancelled = 0
+                for order in list(self.source._ib.openOrders()):
+                    self.source._ib.cancelOrder(order)
+                    cancelled += 1
+                return {"cancelled": cancelled}
+            return {"cancelled": 0, "note": "simulated fills are immediate"}
 
         if name == "FLATTEN_ALL_POSITIONS":
             pnl = self._flatten("MANUAL")
+            # Also clear anything the broker holds that the engine does not
+            # know about, so "flatten all" means exactly that.
+            if hasattr(self.broker, "flatten_broker_positions") and self.last_bar:
+                self.broker.flatten_broker_positions(self.last_bar)
             return {"flattened": pnl is not None, "net_pnl": pnl}
 
         if name == "KILL_SWITCH":
@@ -427,7 +519,7 @@ class Engine:
     def _on_bar(self, quote: PairQuote) -> None:
         now = datetime.now(timezone.utc)
         self._last_events["last_market_data_at"] = now
-        self.broker.roll_session()
+        self.broker.roll_session(self.last_bar)
 
         self.model.add(quote.ts, quote.leg1.price, quote.leg2.price)
         snapshot = self.model.snapshot()
@@ -462,17 +554,49 @@ class Engine:
         signal = self._evaluate(bar, snapshot)
         self._persist(bar, snapshot, signal)
 
+    def _near_close(self, now: datetime | None = None) -> bool:
+        """True inside the no-new-positions window before the closing bell."""
+        if self.flatten_before_close_minutes <= 0:
+            return False
+        now = now or datetime.now(timezone.utc)
+        close = now.replace(hour=RTH_CLOSE_UTC.hour,
+                            minute=RTH_CLOSE_UTC.minute,
+                            second=0, microsecond=0)
+        remaining = (close - now).total_seconds() / 60
+        return 0 <= remaining <= self.flatten_before_close_minutes
+
     def _evaluate(self, bar: Bar, snapshot: ModelSnapshot) -> str:
         """Decide and act. Returns the signal label for persistence."""
         if self.state != "RUNNING":
             return "NO_SIGNAL"
 
-        if not self.trade_outside_rth and market_status() != "MARKET_OPEN":
-            if not self.broker.is_flat:
-                self.broker.mark_to_market(bar)
+        outside_hours = (not self.trade_outside_rth
+                         and market_status() != "MARKET_OPEN")
+        if outside_hours and self.broker.is_flat:
+            # No entries outside regular hours: spreads are wide and prints
+            # unreliable, so an entry signal here is not trustworthy.
             return "NO_SIGNAL"
+        if outside_hours:
+            self.broker.mark_to_market(bar)
+            # An open position is still managed: if the spread has moved far
+            # enough to justify an exit or a stop, act on it.
+            decision = decide(bar, self.broker.position, self.strategy_params)
+            if decision.action != Action.EXIT:
+                return self.current_signal
 
-        decision = decide(bar, self.broker.position, self.strategy_params)
+        # Close before the bell. An intraday mean-reversion position carried
+        # overnight takes gap risk the strategy is not compensated for.
+        if self._near_close() and not self.broker.is_flat:
+            self.broker.exit(bar, snapshot, "END_OF_DAY", self.last_quotes)
+            self.store.log("INFO", "ORDER",
+                           f"Flattened before the close "
+                           f"({self.flatten_before_close_minutes}m to 20:00 "
+                           f"UTC)", self.pair_id)
+            self.current_signal = "NO_SIGNAL"
+            return "EXIT"
+
+        if not outside_hours:
+            decision = decide(bar, self.broker.position, self.strategy_params)
         previous = self.current_signal
 
         if decision.action == Action.HOLD:
@@ -481,6 +605,8 @@ class Engine:
             return self.current_signal if not self.broker.is_flat else "NO_SIGNAL"
 
         if decision.action in (Action.ENTER_LONG, Action.ENTER_SHORT):
+            if self._near_close():
+                return "NO_SIGNAL"      # too close to the bell to open
             direction = ("LONG_SPREAD" if decision.action == Action.ENTER_LONG
                          else "SHORT_SPREAD")
             opened = self.broker.enter(direction, bar, snapshot,
@@ -560,11 +686,11 @@ class Engine:
             "target_position": position_side,
             **thresholds,
             "total_pnl": round(total, 4),
-            "daily_pnl": round(self.broker.daily_pnl, 4),
+            "daily_pnl": round(self.broker.daily_pnl_at(bar), 4),
             "realized_pnl": round(self.broker.realized_pnl, 4),
             "unrealized_pnl": round(unrealized, 4),
             "total_return_pct": (total / capital * 100) if capital else 0.0,
-            "daily_return_pct": ((self.broker.daily_pnl / capital * 100)
+            "daily_return_pct": ((self.broker.daily_pnl_at(bar) / capital * 100)
                                  if capital else 0.0),
             "current_exposure": round(gross, 4),
             "capital_utilisation": (gross / capital * 100) if capital else 0.0,
@@ -590,10 +716,16 @@ class Engine:
 
         if self.broker.position is not None:
             pos = self.broker.position
-            return (f"Holding {pos.direction} on {pair}. Z-score is {z:+.2f}; "
-                    f"the position closes when it reverts inside "
+            held = (datetime.now(timezone.utc) - pos.entry_ts).total_seconds()
+            limit = self.strategy_params.max_holding_period_seconds
+            remaining = (f", {(limit - held) / 86400:.1f} days before the "
+                         f"holding limit" if limit else "")
+            return (f"Holding {pos.direction} on {pair}, opened "
+                    f"{held / 86400:.1f} days ago{remaining}. Z-score is "
+                    f"{z:+.2f}; the position closes when it reverts inside "
                     f"±{self.strategy_params.exit_threshold:g} or breaches "
-                    f"±{self.strategy_params.stop_loss_threshold:g}.")
+                    f"±{self.strategy_params.stop_loss_threshold:g}. It is "
+                    f"held across sessions while the entry thesis holds.")
 
         if snapshot.health != "VALID":
             return (f"Entry is blocked: {snapshot.health_reason}. Z-score is "

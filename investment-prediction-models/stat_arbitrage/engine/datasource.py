@@ -146,7 +146,6 @@ class IBKRSource(MarketDataSource):
                 "ib_async is not installed. `pip install ib_async`. "
                 "(ib_insync is unmaintained; ib_async is its successor.)") from e
 
-        from ib_async import IB
         self._ib = IB()
         self._ib.connect(self.host, self.port, clientId=self.client_id,
                          timeout=self.timeout)

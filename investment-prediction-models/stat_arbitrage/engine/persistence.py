@@ -245,6 +245,26 @@ class Store:
                          .insert(row).execute())
         return res.data[0]["id"] if res and res.data else None
 
+    def open_trade_row(self, pair_id: int) -> dict | None:
+        """The currently open trade, if any.
+
+        This is how a restarted engine recovers what it was doing. A pair
+        position may legitimately be held for days, so an engine that starts
+        assuming it is flat would abandon a live strategy.
+        """
+        try:
+            rows = (self.db.table("trades").select("*").eq("pair_id", pair_id)
+                    .in_("status", ["OPEN", "CLOSING"])
+                    .order("entry_time", desc=True).limit(1).execute().data)
+            return rows[0] if rows else None
+        except Exception as e:
+            print(f"  [store] open_trade_row failed: {str(e)[:160]}")
+            return None
+
+    def update_trade(self, trade_id: int, row: dict) -> None:
+        self._safe("update trade", lambda: self.db.table("trades")
+                   .update(row).eq("id", trade_id).execute())
+
     def close_trade(self, trade_id: int, row: dict) -> None:
         self._safe("close trade", lambda: self.db.table("trades")
                    .update(row).eq("id", trade_id).execute())
