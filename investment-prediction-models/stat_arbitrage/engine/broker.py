@@ -57,6 +57,11 @@ class IBKRBroker(PaperBroker):
         #: further orders may be placed until a human intervenes.
         self.halted = False
         self.halt_reason = ""
+        #: Age of the price the engine is pricing orders against. Set by the
+        #: runner on every bar.
+        self.data_age_seconds: float = 0.0
+        #: Beyond this, a limit priced off the reference is meaningless.
+        self.max_reference_age_seconds: float = 120.0
         # Orders actually reached a broker, whether the account is paper or
         # live. Distinct from PAPER, which means fills were simulated locally.
         self.result_source = "LIVE"
@@ -107,7 +112,22 @@ class IBKRBroker(PaperBroker):
         if qty <= 0:
             raise ExecutionError(f"{ticker}: quantity rounded to zero")
 
-        if force_limit or self.use_limit_orders:
+        want_limit = force_limit or self.use_limit_orders
+        stale = self.data_age_seconds > self.max_reference_age_seconds
+
+        if want_limit and stale and not force_limit:
+            # A limit priced off a stale reference is not marketable: the
+            # market has moved further than the offset, so the order rests
+            # until it times out. Better to send a market order and accept
+            # the spread than to place something that cannot fill.
+            self.store.log(
+                "WARNING", "ORDER",
+                f"Reference price is {self.data_age_seconds / 60:.1f} min old; "
+                f"a {self.limit_offset_bps:g}bps limit would not be "
+                f"marketable. Sending a market order instead.", self.pair_id)
+            want_limit = False
+
+        if want_limit:
             # Marketable limit: priced through the touch so it fills like a
             # market order but caps the damage if the book is thin.
             offset = reference_price * (self.limit_offset_bps / 10_000)
@@ -285,9 +305,11 @@ class IBKRBroker(PaperBroker):
             # Unwinding is urgent: go straight to a marketable limit rather
             # than a market order that a preset may cancel.
             unwound = False
-            for attempt, aggression in enumerate((self.limit_offset_bps,
-                                                  self.limit_offset_bps * 4,
-                                                  self.limit_offset_bps * 10)):
+            # Escalate hard. An unwind that rests unfilled leaves naked
+            # exposure, which is worse than any price paid to close it.
+            for attempt, aggression in enumerate((self.limit_offset_bps * 4,
+                                                  self.limit_offset_bps * 20,
+                                                  self.limit_offset_bps * 100)):
                 try:
                     saved = self.limit_offset_bps
                     self.limit_offset_bps = aggression

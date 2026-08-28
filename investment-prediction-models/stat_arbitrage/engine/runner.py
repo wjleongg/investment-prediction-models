@@ -100,6 +100,13 @@ class Engine:
                 commission_per_share=commission_per_share)
             # getattr, not direct access: a diagnostic log line must never
             # be able to stop the engine starting.
+            if limit_orders:
+                self.store.log(
+                    "WARNING", "SYSTEM",
+                    "Limit orders are priced off the newest bar. On a delayed "
+                    "feed that reference is stale and limits may not be "
+                    "marketable; the broker will fall back to market orders "
+                    "when the reference is over 2 min old.", self.pair_id)
             self.store.log(
                 "INFO", "SYSTEM",
                 f"Order routing: "
@@ -642,6 +649,11 @@ class Engine:
             "leg1_bid": quote.leg1.bid, "leg1_ask": quote.leg1.ask,
             "leg2_bid": quote.leg2.bid, "leg2_ask": quote.leg2.ask,
         }
+
+        # The broker prices orders against this bar, so it must know how old
+        # it is before deciding between a limit and a market order.
+        if hasattr(self.broker, "data_age_seconds"):
+            self.broker.data_age_seconds = (now - snapshot.ts).total_seconds()
 
         bar = Bar(
             ts=snapshot.ts, leg1_price=snapshot.leg1_price,

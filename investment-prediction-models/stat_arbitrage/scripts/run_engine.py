@@ -93,6 +93,16 @@ def main() -> None:
         except KeyboardInterrupt:
             print("\nStopped by operator.")
             return
+        except (ConnectionError, ConnectionRefusedError, OSError) as e:
+            # TWS restarts daily and refuses connections while it is down.
+            # That is expected operation, not a failure, so wait it out
+            # rather than giving up after three tries.
+            delay = min(30 * attempt, 300)
+            print(f"\nBroker unreachable ({type(e).__name__}): {e}")
+            print(f"TWS may be restarting. Retrying in {delay}s "
+                  f"(attempt {attempt}, will keep trying)...")
+            time.sleep(delay)
+            continue
         except Exception as e:
             print(f"\nEngine crashed: {type(e).__name__}: {e}")
             if attempt >= 3:
