@@ -74,7 +74,12 @@ def overview(header: HeaderState) -> None:
                 c.pill(m.health.label, c.HEALTH_TONE.get(m.health, "mute")),
                 unsafe_allow_html=True)
             interval = data.active_interval(pair.id)
-            if live.market_data_is_stale(bar_interval=interval):
+            try:
+                stale = live.market_data_is_stale(bar_interval=interval)
+            except TypeError:
+                # Older contract/models.py without the bar_interval argument.
+                stale = live.market_data_is_stale()
+            if stale:
                 age = live.market_data_age()
                 c.banner(f"⚠ No market data for "
                          f"{'unknown' if age is None else f'{age / 60:.1f} min'} "

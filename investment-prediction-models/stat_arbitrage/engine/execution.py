@@ -56,6 +56,8 @@ class PaperBroker:
         self.leg2 = pair["leg2_ticker"]
         self.params = params
         self.slippage_bps = slippage_bps
+        #: Distinguishes simulated fills from real broker execution.
+        self.result_source = "PAPER"
         self.commission_per_share = commission_per_share
         self.min_commission = min_commission
 
@@ -133,6 +135,7 @@ class PaperBroker:
         ts = datetime.now(timezone.utc)
         trade_id = self.store.open_trade({
             "pair_id": self.pair_id, "direction": direction, "status": "OPEN",
+            "source": self.result_source,
             "entry_time": ts.isoformat(),
             "leg1_entry_price": round(bar.leg1_price, 6),
             "leg2_entry_price": round(bar.leg2_price, 6),

@@ -50,6 +50,9 @@ class IBKRBroker(PaperBroker):
                  limit_offset_bps: float = 2.0, **kwargs) -> None:
         super().__init__(store, pair, params, **kwargs)
         self.source = source            # IBKRSource, supplies ib + contracts
+        # Orders actually reached a broker, whether the account is paper or
+        # live. Distinct from PAPER, which means fills were simulated locally.
+        self.result_source = "LIVE"
         self.fill_timeout = fill_timeout
         self.use_limit_orders = use_limit_orders
         self.limit_offset_bps = limit_offset_bps

@@ -21,7 +21,10 @@ from contract.models import HeaderState
 
 def trades(header: HeaderState) -> None:
     pair = header.pair
-    all_trades = data.fetch_trades(pair.id)
+    sources = data.fetch_result_sources(pair.id) or ["BACKTEST"]
+    source = st.radio("Result source", sources, horizontal=True,
+                      key="tr_src", format_func=lambda s: s.title())
+    all_trades = data.fetch_trades(pair.id, source=source)
 
     if not all_trades:
         c.empty_state("trades", "The engine has not executed any trades yet.")

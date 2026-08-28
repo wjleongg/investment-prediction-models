@@ -258,7 +258,7 @@ def monthly_breakdown(trades: list[dict], eq: pd.DataFrame,
         return []
     daily = eq.set_index("ts")["equity"].resample("D").last().dropna()
     rows = []
-    for period, group in daily.groupby(daily.index.tz_localize(None).to_period("M")):
+    for period, group in daily.groupby(daily.index.to_period("M")):
         if len(group) < 2:
             continue
         month_trades = [t for t in trades
@@ -282,15 +282,18 @@ def monthly_breakdown(trades: list[dict], eq: pd.DataFrame,
 
 def persist(db, pair_id: int, trades: list[dict], eq: pd.DataFrame,
             metrics: dict, monthly: list[dict]) -> None:
+    # Only clear this script's own rows. Live execution results live in the
+    # same tables under a different source and must never be deleted here.
     for table in ("trades", "equity_curve", "performance_metrics"):
-        db.table(table).delete().eq("pair_id", pair_id).execute()
+        (db.table(table).delete().eq("pair_id", pair_id)
+         .eq("source", "BACKTEST").execute())
 
     now = datetime.now(timezone.utc).isoformat()
 
     trade_rows = [{
         **{k: v for k, v in t.items()
            if k not in ("entry_time", "exit_time")},
-        "pair_id": pair_id,
+        "pair_id": pair_id, "source": "BACKTEST",
         "entry_time": t["entry_time"].isoformat(),
         "exit_time": t["exit_time"].isoformat(),
     } for t in trades]
@@ -298,7 +301,8 @@ def persist(db, pair_id: int, trades: list[dict], eq: pd.DataFrame,
     print(f"  trades               {len(trade_rows)}")
 
     eq_rows = [{
-        "pair_id": pair_id, "ts": r["ts"].isoformat(),
+        "pair_id": pair_id, "source": "BACKTEST",
+        "ts": r["ts"].isoformat(),
         "equity": round(float(r["equity"]), 4),
         "cumulative_pnl": round(float(r["cumulative_pnl"]), 4),
         "cumulative_return_pct": float(r["cumulative_return_pct"]),
@@ -309,9 +313,11 @@ def persist(db, pair_id: int, trades: list[dict], eq: pd.DataFrame,
     _insert(db, "equity_curve", eq_rows)
     print(f"  equity_curve         {len(eq_rows)}")
 
-    perf_rows = [{"pair_id": pair_id, "as_of": now, "period_label": "ALL",
+    perf_rows = [{"pair_id": pair_id, "as_of": now, "source": "BACKTEST",
+                  "period_label": "ALL",
                   **{k: v for k, v in metrics.items() if v is not None}}]
-    perf_rows += [{"pair_id": pair_id, "as_of": now, **m} for m in monthly]
+    perf_rows += [{"pair_id": pair_id, "as_of": now, "source": "BACKTEST", **m}
+                  for m in monthly]
     _insert(db, "performance_metrics", perf_rows)
     print(f"  performance_metrics  {len(perf_rows)}")
 

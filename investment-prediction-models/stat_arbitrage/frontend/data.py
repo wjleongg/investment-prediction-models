@@ -330,10 +330,12 @@ def fetch_model_history(pair_id: int, window: str = "1M",
 
 
 @st.cache_data(ttl=TTL_RESEARCH)
-def fetch_price_series(pair_id: int, limit: int = 3000) -> list[dict]:
-    return (_t("market_data").select("ts,ticker,price")
-            .eq("pair_id", pair_id).order("ts", desc=True)
-            .limit(limit).execute().data or [])
+def fetch_price_series(pair_id: int, limit: int = 3000,
+                       bar_interval: str | None = None) -> list[dict]:
+    q = _t("market_data").select("ts,ticker,price").eq("pair_id", pair_id)
+    if bar_interval:
+        q = q.eq("bar_interval", bar_interval)
+    return q.order("ts", desc=True).limit(limit).execute().data or []
 
 
 @st.cache_data(ttl=TTL_DIAG)
@@ -368,10 +370,34 @@ def fetch_rolling(pair_id: int, limit: int = 3000) -> list[RollingDiagnostic]:
 
 
 @st.cache_data(ttl=TTL_SLOW)
-def fetch_trades(pair_id: int, limit: int = 1000) -> list[Trade]:
-    rows = (_t("v_trades").select("*").eq("pair_id", pair_id)
-            .order("entry_time", desc=True).limit(limit).execute().data or [])
+def fetch_trades(pair_id: int, limit: int = 1000,
+                 source: str | None = None) -> list[Trade]:
+    """Trades for one result source.
+
+    Backtest and live results are different claims and must not be pooled
+    into the same statistics.
+    """
+    q = _t("v_trades").select("*").eq("pair_id", pair_id)
+    if source:
+        q = q.eq("source", source)
+    rows = q.order("entry_time", desc=True).limit(limit).execute().data or []
     return [Trade.from_row(r) for r in rows]
+
+
+@st.cache_data(ttl=TTL_DIAG)
+def fetch_result_sources(pair_id: int) -> list[str]:
+    """Which result sources have trades, most recent activity first."""
+    try:
+        rows = (_t("trades").select("source,entry_time").eq("pair_id", pair_id)
+                .order("entry_time", desc=True).limit(500).execute().data or [])
+    except Exception:
+        return []
+    seen: list[str] = []
+    for r in rows:
+        value = r.get("source") or "BACKTEST"
+        if value not in seen:
+            seen.append(value)
+    return seen
 
 
 @st.cache_data(ttl=TTL_SLOW)
@@ -382,16 +408,23 @@ def fetch_orders(pair_id: int, limit: int = 500) -> list[Order]:
 
 
 @st.cache_data(ttl=TTL_SLOW)
-def fetch_equity_curve(pair_id: int, limit: int = 5000) -> list[EquityPoint]:
-    rows = (_t("equity_curve").select("*").eq("pair_id", pair_id)
-            .order("ts", desc=True).limit(limit).execute().data or [])
+def fetch_equity_curve(pair_id: int, limit: int = 5000,
+                       source: str | None = None) -> list[EquityPoint]:
+    q = _t("equity_curve").select("*").eq("pair_id", pair_id)
+    if source:
+        q = q.eq("source", source)
+    rows = q.order("ts", desc=True).limit(limit).execute().data or []
     return [EquityPoint.from_row(r) for r in reversed(rows)]
 
 
 @st.cache_data(ttl=TTL_SLOW)
-def fetch_performance(pair_id: int, period: str = "ALL") -> PerformanceMetrics | None:
-    rows = (_t("performance_metrics").select("*").eq("pair_id", pair_id)
-            .eq("period_label", period).limit(1).execute().data or [])
+def fetch_performance(pair_id: int, period: str = "ALL",
+                      source: str | None = None) -> PerformanceMetrics | None:
+    q = (_t("performance_metrics").select("*").eq("pair_id", pair_id)
+         .eq("period_label", period))
+    if source:
+        q = q.eq("source", source)
+    rows = q.limit(1).execute().data or []
     return PerformanceMetrics.from_row(rows[0]) if rows else None
 
 

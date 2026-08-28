@@ -28,10 +28,15 @@ def research(header: HeaderState) -> None:
 
     # --- Price series -------------------------------------------------
     c.section("Price series")
-    rows = data.fetch_price_series(pair.id)
+    price_interval = (data.fetch_bar_intervals(pair.id) or ["1d"])[0]
+    rows = data.fetch_price_series(pair.id, bar_interval=price_interval)
     if rows:
         df = pd.DataFrame(rows)
-        df["ts"] = pd.to_datetime(df["ts"])
+        # Backfilled and engine-written rows use different timestamp precision,
+        # so an inferred single format fails on the combined set.
+        df["ts"] = pd.to_datetime(df["ts"], format="mixed", utc=True,
+                                  errors="coerce")
+        df = df.dropna(subset=["ts"])
         wide = df.pivot_table(index="ts", columns="ticker",
                               values="price").sort_index().dropna()
         cols = [t for t in (pair.leg1_ticker, pair.leg2_ticker) if t in wide.columns]
@@ -162,11 +167,23 @@ def research(header: HeaderState) -> None:
 # =====================================================================
 
 
+SOURCE_LABEL = {
+    "BACKTEST": "Backtest — simulated over historical bars",
+    "PAPER": "Paper — fills simulated locally against live prices",
+    "LIVE": "Live — orders routed to the broker",
+}
+
+
 def performance(header: HeaderState) -> None:
     pair = header.pair
-    trades = data.fetch_trades(pair.id)
-    equity = data.fetch_equity_curve(pair.id)
-    metrics = data.fetch_performance(pair.id)
+    sources = data.fetch_result_sources(pair.id) or ["BACKTEST"]
+    source = st.radio("Result source", sources, horizontal=True, key="pf_src",
+                      format_func=lambda s: s.title())
+    c.banner(SOURCE_LABEL.get(source, source), "mute")
+
+    trades = data.fetch_trades(pair.id, source=source)
+    equity = data.fetch_equity_curve(pair.id, source=source)
+    metrics = data.fetch_performance(pair.id, source=source)
 
     if not trades and not equity:
         c.empty_state("performance data",
