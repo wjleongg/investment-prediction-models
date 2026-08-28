@@ -26,6 +26,14 @@ def research(header: HeaderState) -> None:
     c.banner("Research reads persisted diagnostics. All estimation is performed "
              "engine-side; this page never runs statistical tests itself.", "mute")
 
+    missing = _missing_analytics()
+    if missing:
+        c.banner(
+            f"engine/analytics.py is out of date on this deployment — "
+            f"missing {', '.join(missing)}. The pair diagnostics and "
+            f"tradeability sections are hidden until it is updated. Everything "
+            f"below is unaffected.", "warn")
+
     # --- Price series -------------------------------------------------
     c.section("Price series")
     price_interval = (data.fetch_bar_intervals(pair.id) or ["1d"])[0]
@@ -140,6 +148,11 @@ def research(header: HeaderState) -> None:
         c.empty_state("hedge ratio history")
 
     # --- Correlation vs cointegration ----------------------------------
+    if missing:
+        _mean_reversion_section(rolling)
+        _research_commentary(pair, cfg, points, tests, rolling, {})
+        return
+
     c.section("Correlation vs cointegration")
     st.caption("Correlation describes whether the legs move together bar to "
                "bar. Cointegration describes whether their levels stay "
@@ -197,6 +210,13 @@ def research(header: HeaderState) -> None:
     trade_info = _tradeability_panel(pair, cfg, points)
 
     # --- Mean reversion -----------------------------------------------
+    _mean_reversion_section(rolling)
+
+    _research_commentary(pair, cfg, points, tests, rolling, trade_info)
+
+
+def _mean_reversion_section(rolling) -> None:
+    """Half-life and Hurst, from persisted rolling diagnostics."""
     c.section("Mean reversion diagnostics")
     hls = [r.half_life for r in rolling if r.half_life is not None]
     hursts = [r.hurst_exponent for r in rolling if r.hurst_exponent is not None]
@@ -217,9 +237,6 @@ def research(header: HeaderState) -> None:
                      "tradeability.", "warn")
     else:
         c.empty_state("mean reversion diagnostics")
-
-    _research_commentary(pair, cfg, points, tests, rolling, trade_info)
-
 
 def _tradeability_panel(pair, cfg, points) -> dict:
     """Gross move per round trip against quoted-spread cost."""
@@ -350,7 +367,7 @@ def _research_commentary(pair, cfg, points, tests, rolling, trade_info) -> None:
     facts["deterministic_warnings"] = warnings
 
     for w in warnings:
-        c.banner(f"⚠ {w}", "warn")
+        c.banner(f"{w}", "warn")
 
     providers = insights.available_providers()
     ctrl, btn = st.columns([2, 1])
@@ -384,6 +401,19 @@ def _research_commentary(pair, cfg, points, tests, rolling, trade_info) -> None:
 # =====================================================================
 # PERFORMANCE
 # =====================================================================
+
+
+#: Analytics functions the Research page depends on. A deployment where the
+#: frontend is newer than engine/analytics.py raises AttributeError deep in a
+#: render call, which Streamlit reports as a redacted stack trace. Checking up
+#: front turns that into a sentence naming the file to update.
+REQUIRED_ANALYTICS = ("returns_relationship", "tradeability",
+                      "tradeability_verdict")
+
+
+def _missing_analytics() -> list[str]:
+    return [name for name in REQUIRED_ANALYTICS
+            if not hasattr(analytics, name)]
 
 
 SOURCE_LABEL = {
@@ -562,7 +592,7 @@ def _attribution_section(pair, closed, equity, metrics) -> None:
         risk=risk, exposure=exposure, cost=cost)
 
     for warning in facts.get("deterministic_warnings", []):
-        c.banner(f"⚠ {warning}", "warn")
+        c.banner(f"{warning}", "warn")
 
     providers = insights.available_providers()
     ctrl, btn = st.columns([2, 1])
