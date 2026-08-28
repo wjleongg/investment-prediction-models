@@ -97,7 +97,7 @@ def overview(header: HeaderState) -> None:
             stale, age = _staleness(live, interval)
             if stale:
                 shown = "unknown" if age is None else f"{age / 60:.1f} min"
-                c.banner(f"No market data for {shown} on a "
+                c.banner(f"⚠ No market data for {shown} on a "
                          f"{interval or 'unknown'} feed.", "warn")
         else:
             c.empty_state("live pair state", "Engine has not written live_state.")
@@ -108,7 +108,18 @@ def overview(header: HeaderState) -> None:
                       horizontal=True, key="ov_tf", label_visibility="collapsed")
         interval = data.fetch_live_bar_interval(pair.id)
         points = data.fetch_model_history(pair.id, tf, bar_interval=interval)
-        trades = data.fetch_trades(pair.id, limit=200)
+
+        # Markers must come from live execution only. Backtest trades span
+        # years and would be drawn onto an intraday chart, stretching the
+        # axis and implying entries that never happened on this feed.
+        live_sources = [x for x in data.fetch_result_sources(pair.id)
+                        if x in ("LIVE", "PAPER")]
+        trades = []
+        for src in live_sources:
+            trades.extend(data.fetch_trades(pair.id, limit=200, source=src))
+        if points:
+            window_start = points[0].ts
+            trades = [t for t in trades if t.entry_time >= window_start]
         if points:
             st.caption(f"{len(points)} bars at {interval or 'unknown'} interval")
             st.plotly_chart(charts.spread_chart(points, trades),
@@ -169,7 +180,7 @@ def overview(header: HeaderState) -> None:
                    else "v-neu"),
         ])
         for breach in analytics.limit_breaches(exposure):
-            c.banner(f"{breach}", "bad")
+            c.banner(f"⚠ {breach}", "bad")
         if exposure["is_flat"]:
             st.caption("Currently flat. Limits shown are the headroom "
                        "available to the next position.")
