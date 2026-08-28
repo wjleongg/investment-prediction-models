@@ -122,7 +122,7 @@ class Engine:
 
         if feed == "poll":
             return build_source("ibkr-poll", bar_size="1 min",
-                                poll_seconds=20.0, **common)
+                                poll_seconds=60.0, lookback="1800 S", **common)
         if feed == "stream":
             return build_source("ibkr", bar_seconds=5, use_delayed=True,
                                 **common)
@@ -173,6 +173,12 @@ class Engine:
             self.store.connection("BROKER", "CONNECTED", self.source.describe())
             self.store.connection("MARKET_DATA", "CONNECTED",
                                   getattr(self.source, "latency_note", ""))
+            # Feed problems must reach the dashboard, not just the console.
+            if hasattr(self.source, "on_status"):
+                self.source.on_status = self._on_feed_status
+            self._subscribe_ibkr_errors()
+            if hasattr(self.source, "on_feed_error"):
+                self.source.on_feed_error = self._on_feed_error
             self.store.log("INFO", "SYSTEM",
                            f"Market data connected: {self.source.describe()}",
                            self.pair_id)
@@ -246,6 +252,62 @@ class Engine:
         self.signal_since = (entry_ts if entry_ts.tzinfo
                              else entry_ts.replace(tzinfo=timezone.utc))
 
+    def _on_feed_error(self, consecutive: int, message: str) -> None:
+        """Report feed failures instead of polling silently forever.
+
+        A source that fails quietly is indistinguishable from a quiet market,
+        which is the worst possible failure mode for a trading engine.
+        """
+        self._last_events["feed_error"] = message
+        if consecutive == 1:
+            self.store.log("WARNING", "MARKET_DATA",
+                           f"No bars from the feed: {message}", self.pair_id)
+        elif consecutive in (3, 10) or consecutive % 30 == 0:
+            self.store.log("ERROR", "MARKET_DATA",
+                           f"{consecutive} consecutive feed failures. Latest: "
+                           f"{message}", self.pair_id)
+            self.store.connection("MARKET_DATA", "ERROR", message[:200])
+        if consecutive >= 3 and not self.broker.is_flat:
+            self.store.log("WARNING", "RISK",
+                           "A position is open while the feed is failing; it "
+                           "cannot be evaluated for exit until bars resume.",
+                           self.pair_id)
+
+    def _on_feed_status(self, level: str, message: str) -> None:
+        self.store.log(level, "MARKET_DATA", message, self.pair_id)
+        if level == "ERROR":
+            self.store.connection("MARKET_DATA", "ERROR", message[:200])
+        elif level == "INFO":
+            self.store.connection("MARKET_DATA", "CONNECTED", message[:200])
+
+    def _subscribe_ibkr_errors(self) -> None:
+        """Record TWS connectivity events, which explain most feed gaps."""
+        ib = getattr(self.source, "_ib", None)
+        if ib is None:
+            return
+
+        def handler(reqId, code, message, *rest):
+            if code == 1100:
+                self.store.connection("BROKER", "DISCONNECTED", message[:200])
+                self.store.log("ERROR", "SYSTEM",
+                               f"[{code}] TWS lost connectivity to IBKR. "
+                               f"No bars will arrive until it returns.",
+                               self.pair_id)
+            elif code in (1101, 1102):
+                self.store.connection("BROKER", "CONNECTED", message[:200])
+                self.store.log("INFO", "SYSTEM",
+                               f"[{code}] TWS connectivity restored.",
+                               self.pair_id)
+            elif code == 1300:
+                self.store.connection("BROKER", "ERROR", message[:200])
+                self.store.log("ERROR", "SYSTEM",
+                               f"[{code}] TWS socket dropped.", self.pair_id)
+
+        try:
+            ib.errorEvent += handler
+        except Exception:
+            pass
+
     def _start_background(self) -> None:
         for target, name in ((self._heartbeat_loop, "heartbeat"),
                              (self._command_loop, "commands")):
@@ -276,11 +338,23 @@ class Engine:
                 have, need = self.model.warmup_progress()
                 detail = f"warming up {have}/{need} bars"
             else:
-                detail = getattr(self.source, "latency_note", "")
+                failures = getattr(self.source, "consecutive_failures", 0)
+                if failures:
+                    detail = (f"feed failing ({failures} consecutive): "
+                              f"{getattr(self.source, 'last_error', '')[:120]}")
+                else:
+                    detail = getattr(self.source, "latency_note", "")
         self.store.heartbeat(
             status=self.state, data_source=self.source.data_source,
             market_status=market_status(), started_at=self.started_at,
             config_version=self.config.get("version"), detail=detail)
+
+    def _feed_is_stale(self) -> float | None:
+        """Seconds since the last bar, or None if none has arrived."""
+        last = self._last_events.get("last_market_data_at")
+        if last is None:
+            return None
+        return (datetime.now(timezone.utc) - last).total_seconds()
 
     def _heartbeat_loop(self) -> None:
         """Liveness is proven here, independently of the trading loop.

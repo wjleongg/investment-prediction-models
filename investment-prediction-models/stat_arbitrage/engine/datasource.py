@@ -342,13 +342,22 @@ class IBKRPollingSource(IBKRSource):
 
     data_source = "LIVE_IBKR"
 
-    def __init__(self, bar_size: str = "1 min", poll_seconds: float = 20.0,
+    #: IBKR rejects more than ~60 historical requests per 10 minutes.
+    #: Each poll costs one request per leg, so 2 legs at 60s = 20 per 10 min.
+    MIN_POLL_SECONDS = 30.0
+
+    def __init__(self, bar_size: str = "1 min", poll_seconds: float = 60.0,
                  lookback: str = "1 D", **kwargs) -> None:
         kwargs.pop("bar_seconds", None)
         super().__init__(**kwargs)
         self.bar_size = bar_size
+        if poll_seconds < self.MIN_POLL_SECONDS:
+            poll_seconds = self.MIN_POLL_SECONDS
         self.poll_seconds = poll_seconds
         self.lookback = lookback
+        self.consecutive_failures = 0
+        self.last_error: str = ""
+        self.on_feed_error = None       # set by the engine to surface errors
         self.bar_interval = bar_size.replace(" ", "").replace("min", "m")
         self._last_emitted: datetime | None = None
 
@@ -375,12 +384,27 @@ class IBKRPollingSource(IBKRSource):
             raise RuntimeError("not connected to IBKR")
         self._stop.clear()
 
+        backoff = 0.0
         while not self._stop.is_set():
+            pq = None
             try:
                 pq = self.historical_pair(ticker1, ticker2, self.lookback,
                                           self.bar_size, completed_only=True)
-            except Exception:
-                pq = None
+                if pq is None:
+                    raise RuntimeError(
+                        "historical request returned no usable bars for both "
+                        "legs (market may have just opened, or IBKR is pacing "
+                        "the request)")
+                self.consecutive_failures = 0
+                backoff = 0.0
+            except Exception as e:
+                self.consecutive_failures += 1
+                self.last_error = str(e)[:300]
+                if self.on_feed_error:
+                    self.on_feed_error(self.consecutive_failures, self.last_error)
+                # Back off on repeated failures: hammering a paced endpoint
+                # makes the pacing violation worse.
+                backoff = min(60.0 * min(self.consecutive_failures, 5), 300.0)
 
             if pq is not None and pq.is_complete:
                 # Only emit a bar we have not already published, so a poll
@@ -389,7 +413,7 @@ class IBKRPollingSource(IBKRSource):
                     self._last_emitted = pq.ts
                     yield pq
 
-            self._ib.sleep(self.poll_seconds)
+            self._ib.sleep(self.poll_seconds + backoff)
 
 
 # =====================================================================
