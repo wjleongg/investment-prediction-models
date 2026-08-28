@@ -47,9 +47,16 @@ class IBKRBroker(PaperBroker):
 
     def __init__(self, store, pair: dict, params, source,
                  fill_timeout: float = 30.0, use_limit_orders: bool = False,
-                 limit_offset_bps: float = 2.0, **kwargs) -> None:
+                 limit_offset_bps: float = 5.0, tif: str = "DAY",
+                 outside_rth: bool = False, **kwargs) -> None:
         super().__init__(store, pair, params, **kwargs)
         self.source = source            # IBKRSource, supplies ib + contracts
+        self.tif = tif
+        self.outside_rth = outside_rth
+        #: Set when an unwind fails. The account state is then unknown and no
+        #: further orders may be placed until a human intervenes.
+        self.halted = False
+        self.halt_reason = ""
         # Orders actually reached a broker, whether the account is paper or
         # live. Distinct from PAPER, which means fills were simulated locally.
         self.result_source = "LIVE"
@@ -61,11 +68,38 @@ class IBKRBroker(PaperBroker):
     def _ib(self):
         return self.source._ib
 
+    def _prepare(self, order):
+        """Set fields TWS presets otherwise override.
+
+        Leaving time-in-force unset lets a TWS order preset substitute its own
+        and cancel the order (error 10349). Setting it explicitly stops the
+        preset from taking over.
+        """
+        order.tif = self.tif
+        order.outsideRth = self.outside_rth
+        order.transmit = True
+        # Presets can also attach algos to API orders; clear anything set.
+        order.algoStrategy = ""
+        order.algoParams = []
+        return order
+
     # --- order placement ----------------------------------------------
 
     def _place(self, ticker: str, side: str, quantity: float,
-               reference_price: float):
-        """Submit one order and wait for a terminal state."""
+               reference_price: float, force_limit: bool = False,
+               _retried: bool = False):
+        """Submit one order and wait for a terminal state.
+
+        A market order cancelled by a TWS preset is retried once as a
+        marketable limit, which presets do not intercept the same way.
+        """
+        # Checked before touching any broker API: once halted, nothing may
+        # reach IBKR at all.
+        if self.halted:
+            raise ExecutionError(
+                f"broker halted: {self.halt_reason}. No further orders will "
+                f"be placed until the position is resolved manually.")
+
         from ib_async import LimitOrder, MarketOrder
 
         contract = self.source._contract(ticker)
@@ -73,15 +107,15 @@ class IBKRBroker(PaperBroker):
         if qty <= 0:
             raise ExecutionError(f"{ticker}: quantity rounded to zero")
 
-        if self.use_limit_orders:
+        if force_limit or self.use_limit_orders:
             # Marketable limit: priced through the touch so it fills like a
             # market order but caps the damage if the book is thin.
             offset = reference_price * (self.limit_offset_bps / 10_000)
             limit = (reference_price + offset if side == "BUY"
                      else reference_price - offset)
-            order = LimitOrder(side, qty, round(limit, 2))
+            order = self._prepare(LimitOrder(side, qty, round(limit, 2)))
         else:
-            order = MarketOrder(side, qty)
+            order = self._prepare(MarketOrder(side, qty))
 
         trade = self._ib.placeOrder(contract, order)
 
@@ -101,8 +135,24 @@ class IBKRBroker(PaperBroker):
         filled = float(trade.orderStatus.filled or 0)
 
         if status in TERMINAL_BAD or filled <= 0:
+            preset_cancelled = any(
+                entry.errorCode in (10349, 10350, 10351)
+                for entry in trade.log if getattr(entry, "errorCode", 0))
+            if not _retried and not force_limit:
+                self.store.log(
+                    "WARNING", "ORDER",
+                    f"{ticker} {side} {qty} was cancelled"
+                    + (" by a TWS order preset (10349)" if preset_cancelled
+                       else f" (status={status})")
+                    + "; retrying as a marketable limit order",
+                    self.pair_id)
+                return self._place(ticker, side, quantity, reference_price,
+                                   force_limit=True, _retried=True)
             raise ExecutionError(
-                f"{ticker} {side} {qty} was not filled (status={status})",
+                f"{ticker} {side} {qty} was not filled (status={status})"
+                + (". A TWS order preset is overriding the time-in-force and "
+                   "cancelling API orders — check Global Configuration → "
+                   "Presets → Stocks." if preset_cancelled else ""),
                 status, str(trade.order.orderId))
 
         if filled < qty:
@@ -232,14 +282,40 @@ class IBKRBroker(PaperBroker):
             self.store.log("WARNING", "RISK",
                            f"Unwinding orphaned leg: {side} {abs(qty):g} "
                            f"{ticker}", self.pair_id)
-            try:
-                self._place(ticker, side, abs(qty), price)
-            except ExecutionError as e:
+            # Unwinding is urgent: go straight to a marketable limit rather
+            # than a market order that a preset may cancel.
+            unwound = False
+            for attempt, aggression in enumerate((self.limit_offset_bps,
+                                                  self.limit_offset_bps * 4,
+                                                  self.limit_offset_bps * 10)):
+                try:
+                    saved = self.limit_offset_bps
+                    self.limit_offset_bps = aggression
+                    self._place(ticker, side, abs(qty), price,
+                                force_limit=True)
+                    self.limit_offset_bps = saved
+                    unwound = True
+                    self.store.log("INFO", "RISK",
+                                   f"Unwound orphaned {ticker} on attempt "
+                                   f"{attempt + 1}", self.pair_id)
+                    break
+                except ExecutionError as e:
+                    self.limit_offset_bps = saved
+                    self.store.log("WARNING", "RISK",
+                                   f"Unwind attempt {attempt + 1} for "
+                                   f"{ticker} failed: {e}", self.pair_id)
+
+            if not unwound:
+                # The account is in an unknown state. Placing further orders
+                # from here can only compound the problem.
+                self.halted = True
+                self.halt_reason = (f"failed to unwind {abs(qty):g} {ticker}")
                 self.store.log(
                     "CRITICAL", "RISK",
-                    f"COULD NOT UNWIND {ticker}: {e}. The account is holding "
-                    f"unhedged directional exposure and needs manual "
-                    f"intervention.", self.pair_id)
+                    f"COULD NOT UNWIND {ticker}. The account is holding "
+                    f"unhedged directional exposure of {qty:+g} shares. "
+                    f"TRADING IS HALTED until this is closed manually in TWS.",
+                    self.pair_id)
 
     # --- reconciliation -----------------------------------------------
 

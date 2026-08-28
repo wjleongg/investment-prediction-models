@@ -98,11 +98,21 @@ class Engine:
                 self.store, self.pair, self.strategy_params, self.source,
                 use_limit_orders=limit_orders,
                 commission_per_share=commission_per_share)
+            # getattr, not direct access: a diagnostic log line must never
+            # be able to stop the engine starting.
             self.store.log(
                 "INFO", "SYSTEM",
-                f"Order routing: {'marketable limit' if limit_orders else 'market'}"
-                f" orders, TIF={self.broker.tif}, outsideRth="
-                f"{self.broker.outside_rth}", self.pair_id)
+                f"Order routing: "
+                f"{'marketable limit' if limit_orders else 'market'} orders, "
+                f"TIF={getattr(self.broker, 'tif', 'default')}, "
+                f"outsideRth={getattr(self.broker, 'outside_rth', False)}",
+                self.pair_id)
+            if not hasattr(self.broker, "tif"):
+                self.store.log(
+                    "WARNING", "SYSTEM",
+                    "engine/broker.py predates the TIF fix. Orders may be "
+                    "cancelled by a TWS order preset (error 10349). Update "
+                    "broker.py before trading.", self.pair_id)
         else:
             self.broker = PaperBroker(
                 self.store, self.pair, self.strategy_params,
