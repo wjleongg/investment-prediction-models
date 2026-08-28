@@ -332,34 +332,44 @@ class IBKRPollingSource(IBKRSource):
 
     IBKR's complimentary real-time data is licensed for TWS display only and
     is not delivered over the API (error 2186). Historical data goes through
-    HMDS, which carries no such restriction, so polling the most recent bar
-    gives genuine current prices for free.
+    HMDS, which is served without that restriction — but on an unsubscribed
+    account it is delayed by roughly 15 minutes, measured directly with
+    scripts/check_lag.py. This feed is therefore usable for validating the
+    pipeline, not for judging an edge whose half-life is minutes.
 
-    Trade-off: latency is one bar rather than one tick, and there are no
-    bid/ask quotes, so quoted-spread cost cannot be measured from this feed.
-    Everything else about the engine is unchanged.
+    Trade-off: one bar of granularity instead of ticks, ~16 minutes of delay,
+    and no bid/ask. Everything else about the engine is unchanged.
     """
 
     data_source = "LIVE_IBKR"
 
-    #: IBKR rejects more than ~60 historical requests per 10 minutes.
-    #: Each poll costs one request per leg, so 2 legs at 60s = 20 per 10 min.
+    #: IBKR rejects more than ~60 historical requests per 10 minutes. Each
+    #: poll costs one request per leg, so 60s across 2 legs is 20 per 10 min.
     MIN_POLL_SECONDS = 30.0
+
+    #: Lag above which the feed is reported as materially stale.
+    LAG_WARN_SECONDS = 300.0
 
     def __init__(self, bar_size: str = "1 min", poll_seconds: float = 60.0,
                  lookback: str = "1 D", **kwargs) -> None:
         kwargs.pop("bar_seconds", None)
         super().__init__(**kwargs)
         self.bar_size = bar_size
-        if poll_seconds < self.MIN_POLL_SECONDS:
-            poll_seconds = self.MIN_POLL_SECONDS
-        self.poll_seconds = poll_seconds
+        self.poll_seconds = max(poll_seconds, self.MIN_POLL_SECONDS)
+        # "1 D" is the duration IBKR reliably serves for 1-minute bars.
+        # Shorter windows such as "1800 S" return nothing.
         self.lookback = lookback
-        self.consecutive_failures = 0
-        self.last_error: str = ""
-        self.on_feed_error = None       # set by the engine to surface errors
         self.bar_interval = bar_size.replace(" ", "").replace("min", "m")
+
+        # --- mutable state, all initialised here ---------------------
         self._last_emitted: datetime | None = None
+        self._consecutive_failures = 0
+        self._lag_warned = False
+        self.last_bar_lag_seconds: float | None = None
+        self.last_error = ""
+        #: Engine sets this to route feed events into the log and the
+        #: connection_status table.
+        self.on_status = None
 
     @property
     def latency_note(self) -> str:
@@ -369,12 +379,21 @@ class IBKRPollingSource(IBKRSource):
         return (f"bar feed ({self.bar_size} polled every "
                 f"{self.poll_seconds:g}s){measured}; no bid/ask")
 
+    def _report(self, level: str, message: str) -> None:
+        self.last_error = message if level in ("WARNING", "ERROR") else ""
+        if self.on_status:
+            try:
+                self.on_status(level, message)
+            except Exception:
+                pass
+
     def warmup(self, ticker1: str, ticker2: str,
                lookback: str = "2 D") -> list[PairQuote]:
         """Historical bars for model warmup, aligned on timestamp.
 
-        The engine needs its own intraday statistics — hedge ratio and spread
-        moments computed from daily bars do not describe an intraday spread.
+        The engine needs statistics computed on its own timescale: a hedge
+        ratio and spread moments derived from daily bars do not describe an
+        intraday spread.
         """
         b1 = {q.ts: q for q in self.historical(ticker1, lookback, self.bar_size)}
         b2 = {q.ts: q for q in self.historical(ticker2, lookback, self.bar_size)}
@@ -382,52 +401,71 @@ class IBKRPollingSource(IBKRSource):
         return [PairQuote(ts=ts, leg1=b1[ts], leg2=b2[ts]) for ts in common]
 
     def stream(self, ticker1: str, ticker2: str) -> Iterator[PairQuote]:
-        """Emit each newly completed bar exactly once."""
+        """Emit each newly completed bar exactly once.
+
+        Failures are reported rather than swallowed: a feed that has silently
+        stopped delivering looks identical to a quiet market, and the
+        difference matters.
+        """
         if not self.is_connected():
             raise RuntimeError("not connected to IBKR")
         self._stop.clear()
 
-        backoff = 0.0
         while not self._stop.is_set():
-            pq = None
+            wait = self.poll_seconds
             try:
                 pq = self.historical_pair(ticker1, ticker2, self.lookback,
                                           self.bar_size, completed_only=True)
-                if pq is None:
-                    raise RuntimeError(
-                        "historical request returned no usable bars for both "
-                        "legs (market may have just opened, or IBKR is pacing "
-                        "the request)")
-                self.consecutive_failures = 0
-                backoff = 0.0
             except Exception as e:
-                self.consecutive_failures += 1
-                self.last_error = str(e)[:300]
-                if self.on_feed_error:
-                    self.on_feed_error(self.consecutive_failures, self.last_error)
-                # Back off on repeated failures: hammering a paced endpoint
-                # makes the pacing violation worse.
-                backoff = min(60.0 * min(self.consecutive_failures, 5), 300.0)
+                pq = None
+                self._report("ERROR", f"Historical request raised: "
+                                      f"{type(e).__name__}: {str(e)[:120]}")
 
             if pq is not None and pq.is_complete:
-                # Only emit a bar we have not already published, so a poll
-                # faster than the bar interval does not duplicate rows.
+                if self._consecutive_failures:
+                    self._report("INFO", f"Feed recovered after "
+                                         f"{self._consecutive_failures} empty "
+                                         f"responses")
+                    self._consecutive_failures = 0
+
                 if self._last_emitted is None or pq.ts > self._last_emitted:
                     self._last_emitted = pq.ts
-                    # Report how far behind the bar is. Without a market data
-                    # subscription IBKR delays historical bars too, and that
-                    # lag decides whether a signal is actionable or archaeology.
                     lag = (datetime.now(timezone.utc) - pq.ts).total_seconds()
-                    if lag > 300 and self._lag_warned is False:
-                        self._report("WARNING",
-                                     f"Bars arrive {lag / 60:.0f} min behind "
-                                     f"real time. Signals reference a market "
-                                     f"that has already moved.")
-                        self._lag_warned = True
                     self.last_bar_lag_seconds = lag
+                    if lag > self.LAG_WARN_SECONDS and not self._lag_warned:
+                        self._lag_warned = True
+                        self._report(
+                            "WARNING",
+                            f"Bars arrive {lag / 60:.0f} min behind real time. "
+                            f"Signals reference a market that has already "
+                            f"moved.")
                     yield pq
+            else:
+                self._consecutive_failures += 1
+                n = self._consecutive_failures
+                if n in (3, 10) or n % 30 == 0:
+                    self._report(
+                        "WARNING" if n < 10 else "ERROR",
+                        f"No bars returned for {n} consecutive polls "
+                        f"(~{n * self.poll_seconds / 60:.0f} min). Usually "
+                        f"IBKR historical pacing, or the connection dropped.")
+                if n == 5:
+                    # After a 1100/1102 reconnect the cached contract objects
+                    # can be stale.
+                    self._report("INFO", "Re-qualifying contracts after "
+                                         "repeated empty responses")
+                    self._contracts.clear()
+                    try:
+                        self._contract(ticker1)
+                        self._contract(ticker2)
+                    except Exception as e:
+                        self._report("ERROR", f"Re-qualify failed: "
+                                              f"{str(e)[:120]}")
+                # Back off so a pacing problem is not worsened by retrying
+                # into it, capped so recovery is not delayed indefinitely.
+                wait = min(self.poll_seconds * (1 + min(n, 5)), 300)
 
-            self._ib.sleep(self.poll_seconds + backoff)
+            self._ib.sleep(wait)
 
 
 # =====================================================================
