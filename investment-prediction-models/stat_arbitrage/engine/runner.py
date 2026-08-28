@@ -161,6 +161,11 @@ class Engine:
 
     def _connect(self) -> None:
         self.store.connection("DATABASE", "CONNECTED")
+        self.store.connection("ENGINE", "CONNECTED",
+                              f"pid running, feed={self.feed_kind}, "
+                              f"broker={self.broker_kind}")
+        self.store.connection("ANALYTICS", "CONNECTED",
+                              "computed in-process by the engine")
         try:
             self.source.connect()
             # Report what IBKR actually sends, not what was requested.
@@ -325,6 +330,7 @@ class Engine:
             pass
         self.store.connection("MARKET_DATA", "DISCONNECTED")
         self.store.connection("BROKER", "DISCONNECTED")
+        self.store.connection("ENGINE", "DISCONNECTED", "engine stopped")
         self._write_heartbeat("engine shut down")
         self.store.log("INFO", "SYSTEM",
                        f"Engine stopped. Realized P&L "

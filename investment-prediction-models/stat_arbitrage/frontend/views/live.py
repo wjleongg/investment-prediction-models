@@ -73,8 +73,12 @@ def overview(header: HeaderState) -> None:
             st.markdown(
                 c.pill(m.health.label, c.HEALTH_TONE.get(m.health, "mute")),
                 unsafe_allow_html=True)
-            if live.market_data_is_stale():
-                c.banner("Market data is stale.", "warn")
+            interval = data.active_interval(pair.id)
+            if live.market_data_is_stale(bar_interval=interval):
+                age = live.market_data_age()
+                c.banner(f"⚠ No market data for "
+                         f"{'unknown' if age is None else f'{age / 60:.1f} min'} "
+                         f"on a {interval or 'unknown'} feed.", "warn")
         else:
             c.empty_state("live pair state", "Engine has not written live_state.")
 
@@ -82,15 +86,20 @@ def overview(header: HeaderState) -> None:
         c.section("Spread")
         tf = st.radio("Timeframe", list(data.TIMEFRAMES.keys()), index=5,
                       horizontal=True, key="ov_tf", label_visibility="collapsed")
-        points = data.fetch_model_history(pair.id, tf)
+        interval = data.fetch_live_bar_interval(pair.id)
+        points = data.fetch_model_history(pair.id, tf, bar_interval=interval)
         trades = data.fetch_trades(pair.id, limit=200)
         if points:
+            st.caption(f"{len(points)} bars at {interval or 'unknown'} interval")
             st.plotly_chart(charts.spread_chart(points, trades),
                             use_container_width=True, key="ov_spread")
             st.plotly_chart(charts.zscore_chart(points, trades),
                             use_container_width=True, key="ov_z")
         else:
-            c.empty_state("spread history", f"No model_state_history in {tf}.")
+            c.empty_state(
+                "spread history",
+                f"No {interval or ''} bars in the last {tf}. If the engine is "
+                f"running, check System Health for feed errors.")
 
     # --- Model state --------------------------------------------------
     c.section("Model state")
@@ -140,7 +149,7 @@ def overview(header: HeaderState) -> None:
                    else "v-neu"),
         ])
         for breach in analytics.limit_breaches(exposure):
-            c.banner(f"{breach}", "bad")
+            c.banner(f"⚠ {breach}", "bad")
         if exposure["is_flat"]:
             st.caption("Currently flat. Limits shown are the headroom "
                        "available to the next position.")

@@ -270,6 +270,48 @@ TIMEFRAMES: dict[str, timedelta | None] = {
 }
 
 
+@st.cache_data(ttl=TTL_LIVE)
+def fetch_live_bar_interval(pair_id: int) -> str | None:
+    """The bar interval the engine is currently writing.
+
+    The daily backfill and the live intraday feed live in the same table.
+    Charting them together would splice two timescales into one series, so
+    the live pages follow whatever the newest row was written at.
+    """
+    rows = (_t("model_state_history").select("bar_interval")
+            .eq("pair_id", pair_id).order("ts", desc=True)
+            .limit(1).execute().data or [])
+    return rows[0]["bar_interval"] if rows else None
+
+
+@st.cache_data(ttl=TTL_DIAG)
+def fetch_bar_intervals(pair_id: int) -> list[str]:
+    """Bar intervals present for this pair, most recently written first.
+
+    Daily backfill and live intraday data are different timescales. Plotting
+    them on one axis produces a meaningless series, so every chart must pick
+    one.
+    """
+    try:
+        rows = (_t("model_state_history").select("bar_interval,ts")
+                .eq("pair_id", pair_id).order("ts", desc=True)
+                .limit(400).execute().data or [])
+    except Exception:
+        return []
+    seen: list[str] = []
+    for r in rows:
+        value = r.get("bar_interval") or "1d"
+        if value not in seen:
+            seen.append(value)
+    return seen
+
+
+def active_interval(pair_id: int) -> str | None:
+    """The interval the engine is currently writing."""
+    intervals = fetch_bar_intervals(pair_id)
+    return intervals[0] if intervals else None
+
+
 @st.cache_data(ttl=TTL_SERIES)
 def fetch_model_history(pair_id: int, window: str = "1M",
                         max_points: int = MAX_CHART_POINTS,

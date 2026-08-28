@@ -47,7 +47,8 @@ def research(header: HeaderState) -> None:
 
     # --- Spread -------------------------------------------------------
     c.section("Spread analysis")
-    points = data.fetch_model_history(pair.id, "ALL")
+    # Research uses the daily backfill; live pages use the engine's interval.
+    points = data.fetch_model_history(pair.id, "ALL", bar_interval="1d")
     if points:
         st.plotly_chart(charts.spread_chart(points, height=340),
                         use_container_width=True, key="rs_spread")

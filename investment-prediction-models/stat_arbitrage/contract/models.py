@@ -41,7 +41,26 @@ except ImportError:  # pragma: no cover
 
 HEARTBEAT_STALE_SECONDS = 5.0
 HEARTBEAT_DEAD_SECONDS = 30.0
+# Default for tick feeds. Bar feeds pass their own threshold: a 1-minute bar
+# feed is not stale at 15 seconds, it is simply between bars.
 MARKET_DATA_STALE_SECONDS = 15.0
+
+#: How many missed intervals count as stale, for bar-based feeds.
+STALE_INTERVAL_MULTIPLE = 3.0
+
+BAR_INTERVAL_SECONDS = {"1s": 1, "2s": 2, "5s": 5, "10s": 10, "30s": 30,
+                        "1m": 60, "2m": 120, "5m": 300, "15m": 900,
+                        "1h": 3600, "1d": 86400}
+
+
+def stale_threshold(bar_interval: str | None) -> float:
+    """Seconds without data before a feed counts as stale."""
+    if not bar_interval:
+        return MARKET_DATA_STALE_SECONDS
+    seconds = BAR_INTERVAL_SECONDS.get(bar_interval)
+    if seconds is None:
+        return MARKET_DATA_STALE_SECONDS
+    return max(seconds * STALE_INTERVAL_MULTIPLE, MARKET_DATA_STALE_SECONDS)
 COMMAND_CONFIRM_TIMEOUT_SECONDS = 30.0
 
 
@@ -388,9 +407,15 @@ class LiveState:
 
     config_version: int | None = None
 
-    def market_data_is_stale(self, now: datetime | None = None) -> bool:
+    def market_data_is_stale(self, now: datetime | None = None,
+                             bar_interval: str | None = None) -> bool:
         age = _age_seconds(self.last_market_data_at, now)
-        return age is None or age > MARKET_DATA_STALE_SECONDS
+        if age is None:
+            return True
+        return age > stale_threshold(bar_interval)
+
+    def market_data_age(self, now: datetime | None = None) -> float | None:
+        return _age_seconds(self.last_market_data_at, now)
 
     def price_for_leg(self, leg: int) -> float | None:
         return self.leg1_price if leg == 1 else self.leg2_price
